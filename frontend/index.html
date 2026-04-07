@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Carranza Cursos â Gerador de Materiais</title>
+  <title>Carranza Cursos — Gerador de Materiais</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>ð¦</text></svg>">
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
@@ -42,7 +42,7 @@
       pointer-events: none;
     }
 
-    /* ââ HEADER ââ */
+    /* –– HEADER –– */
     .header {
       background: linear-gradient(135deg, var(--vinho), var(--vermelho));
       padding: 0;
@@ -84,7 +84,7 @@
       letter-spacing: 0.04em;
     }
 
-    /* ââ MAIN ââ */
+    /* –– MAIN –– */
     main {
       max-width: 640px;
       margin: 0 auto;
@@ -100,7 +100,7 @@
       box-shadow: 0 2px 16px rgba(0,0,0,0.04), 0 0 0 1px rgba(0,0,0,0.03);
     }
 
-    /* ââ LABELS ââ */
+    /* –– LABELS –– */
     .field-label {
       display: block;
       font-size: 13px;
@@ -110,7 +110,7 @@
       letter-spacing: 0.02em;
     }
 
-    /* ââ FILE UPLOAD ââ */
+    /* –– FILE UPLOAD –– */
     .upload-zone {
       border: 2px dashed #D0C8C0;
       border-radius: 14px;
@@ -163,7 +163,7 @@
     }
     .file-remove:hover { color: var(--vermelho); }
 
-    /* ââ TYPE SELECTOR ââ */
+    /* –– TYPE SELECTOR –– */
     .type-grid {
       display: flex; gap: 12px; margin-bottom: 28px;
     }
@@ -193,7 +193,7 @@
     }
     .type-btn.active .desc { color: var(--vermelho); }
 
-    /* ââ INPUTS ââ */
+    /* –– INPUTS –– */
     .fields-group { margin-bottom: 28px; }
     .fields-group .field-label { margin-bottom: 12px; }
     .field-stack { display: flex; flex-direction: column; gap: 10px; }
@@ -223,7 +223,7 @@
       margin-left: 8px;
     }
 
-    /* ââ GENERATE BUTTON ââ */
+    /* –– GENERATE BUTTON –– */
     .btn-generate {
       width: 100%;
       padding: 16px;
@@ -250,7 +250,7 @@
       cursor: default;
     }
 
-    /* ââ PROGRESS ââ */
+    /* –– PROGRESS –– */
     .progress-box {
       background: rgba(112,0,28,0.04);
       border-radius: 12px;
@@ -275,7 +275,7 @@
       transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
-    /* ââ SUCCESS ââ */
+    /* –– SUCCESS –– */
     .success-box {
       background: linear-gradient(135deg, rgba(112,0,28,0.04), rgba(176,0,44,0.02));
       border-radius: 16px;
@@ -329,7 +329,7 @@
       border-color: var(--vinho);
     }
 
-    /* ââ ERROR ââ */
+    /* –– ERROR –– */
     .error-box {
       background: #FFF5F5;
       border: 1px solid #FECACA;
@@ -341,7 +341,7 @@
       display: flex; align-items: flex-start; gap: 10px;
     }
 
-    /* ââ FOOTER ââ */
+    /* –– FOOTER –– */
     .footer {
       text-align: center;
       margin-top: 28px;
@@ -359,7 +359,7 @@
       font-size: 11px; color: #BBB;
     }
 
-    /* ââ SPINNER ââ */
+    /* –– SPINNER –– */
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner { animation: spin 1s linear infinite; }
   </style>
@@ -393,21 +393,21 @@
 
     <div class="footer">
       <p class="citacao" id="citacao"></p>
-      <p class="copy">Carranza Cursos Â© 2025 Â· Gerador de Materiais</p>
+      <p class="copy">Carranza Cursos © 2025 Â· Gerador de Materiais</p>
     </div>
   </main>
 
   <script>
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-    // CONFIGURAÃÃO
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+    // CONFIGURAÇÃO
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 
-    // â¬ï¸  TROQUE PELA URL DO SEU BACKEND NO RENDER  â¬ï¸
+    // –¬ï¸  TROQUE PELA URL DO SEU BACKEND NO RENDER  –¬ï¸
     const API_URL = 'https://carranza-gerador.onrender.com';
 
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     // ESTADO
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     let state = {
       file: null,
       materialType: 'slides',
@@ -425,13 +425,13 @@
     };
 
     const citacoes = [
-      "A forÃ§a estÃ¡ em se erguer com mais poder, como a Ã¡guia.",
-      "A Ã¡guia foca no futuro, nÃ£o no que estÃ¡ atrÃ¡s.",
-      "Para voar alto, deixe as correntes para trÃ¡s, como a Ã¡guia.",
-      "Nas tempestades, como a Ã¡guia, encontre o voo mais alto.",
+      "A força está em se erguer com mais poder, como a águia.",
+      "A águia foca no futuro, não no que está atrás.",
+      "Para voar alto, deixe as correntes para trás, como a águia.",
+      "Nas tempestades, como a águia, encontre o voo mais alto.",
     ];
 
-    // Rotacionar citaÃ§Ãµes
+    // Rotacionar citações
     let citIdx = 0;
     setInterval(() => {
       citIdx = (citIdx + 1) % citacoes.length;
@@ -440,16 +440,16 @@
     }, 5000);
     document.getElementById('citacao').textContent = `"${citacoes[0]}"`;
 
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     // RENDER
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     function render() {
       const app = document.getElementById('app');
 
       let html = '';
 
       // File upload
-      html += `<label class="field-label">Documento de referÃªncia</label>`;
+      html += `<label class="field-label">Documento de referência</label>`;
       if (!state.file) {
         html += `
           <div class="upload-zone" id="dropzone" onclick="document.getElementById('fileInput').click()">
@@ -499,7 +499,7 @@
           </div>
           <div>
             <p class="label">Slides</p>
-            <p class="desc">ApresentaÃ§Ã£o PowerPoint</p>
+            <p class="desc">Apresentação PowerPoint</p>
           </div>
         </button>
         <button class="type-btn ${state.materialType === 'td' ? 'active' : ''}" onclick="setType('td')">
@@ -521,10 +521,10 @@
       // Metadata fields
       html += `
         <div class="fields-group">
-          <label class="field-label">InformaÃ§Ãµes da capa</label>
+          <label class="field-label">Informações da capa</label>
           <div class="field-stack">
-            <input type="text" placeholder="Disciplina (ex: LÃ­ngua Portuguesa)" value="${state.disciplina}" oninput="state.disciplina=this.value">
-            <input type="text" placeholder="Assunto (ex: ColocaÃ§Ã£o Pronominal)" value="${state.assunto}" oninput="state.assunto=this.value">
+            <input type="text" placeholder="Disciplina (ex: Língua Portuguesa)" value="${state.disciplina}" oninput="state.disciplina=this.value">
+            <input type="text" placeholder="Assunto (ex: Colocação Pronominal)" value="${state.assunto}" oninput="state.assunto=this.value">
             <input type="text" placeholder="Professor (ex: Prof. Arnaldo Filho)" value="${state.professor}" oninput="state.professor=this.value">
           </div>
         </div>`;
@@ -532,8 +532,8 @@
       // Instructions
       html += `
         <div class="fields-group">
-          <label class="field-label">InstruÃ§Ãµes adicionais <span class="optional-badge">opcional</span></label>
-          <textarea rows="3" placeholder="Ex: fazer apenas as questÃµes, incluindo o gabarito."
+          <label class="field-label">Instruções adicionais <span class="optional-badge">opcional</span></label>
+          <textarea rows="3" placeholder="Ex: fazer apenas as questões, incluindo o gabarito."
             oninput="state.instrucoes=this.value">${state.instrucoes}</textarea>
         </div>`;
 
@@ -589,7 +589,7 @@
               </svg>
             </div>
             <h3>Material gerado!</h3>
-            <p>Seu ${state.materialType === 'slides' ? 'PPTX' : 'documento'} estÃ¡ pronto.</p>
+            <p>Seu ${state.materialType === 'slides' ? 'PPTX' : 'documento'} está pronto.</p>
             <div>
               <a class="btn-download" href="${state.downloadUrl}" download="${state.downloadName}">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
@@ -609,9 +609,9 @@
       setTimeout(setupDragDrop, 50);
     }
 
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     // HANDLERS
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     function handleFile(e) {
       const f = e.target.files[0];
       if (f) { state.file = f; state.error = null; render(); }
@@ -652,9 +652,9 @@
       });
     }
 
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     // GERAR MATERIAL (CHAMADA AO BACKEND)
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     async function gerarMaterial() {
       if (!state.file) return;
 
@@ -664,11 +664,11 @@
       state.isDone = false;
       render();
 
-      // SimulaÃ§Ã£o de progresso visual enquanto o backend processa
+      // Simulação de progresso visual enquanto o backend processa
       const progressSteps = [
         { pct: 10, msg: 'Enviando documento...' },
-        { pct: 30, msg: 'Analisando conteÃºdo...' },
-        { pct: 50, msg: 'Estruturando questÃµes...' },
+        { pct: 30, msg: 'Analisando conteúdo...' },
+        { pct: 50, msg: 'Estruturando questões...' },
         { pct: 70, msg: 'Montando slides...' },
         { pct: 85, msg: 'Aplicando layout Carranza...' },
       ];
@@ -692,7 +692,7 @@
         formData.append('tipo', state.materialType);
         formData.append('instrucoes', state.instrucoes);
 
-        const response = await fetch(`${API_URL}/api/gerar`, {
+        const response = await fetch(`${API_URL}/gerar`, {
           method: 'POST',
           body: formData,
         });
@@ -712,7 +712,7 @@
         state.downloadUrl = URL.createObjectURL(blob);
         state.downloadName = nome;
         state.progress = 100;
-        state.status = 'ConcluÃ­do!';
+        state.status = 'Concluído!';
         state.isDone = true;
         state.isGenerating = false;
 
@@ -726,9 +726,9 @@
       render();
     }
 
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     // INIT
-    // âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+    // –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     render();
   </script>
 </body>
