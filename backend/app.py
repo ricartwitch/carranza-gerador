@@ -97,36 +97,12 @@ def slide_capa(prs, disciplina, assunto, tipo, professor):
         r.font.name = 'Calibri'
     return slide
 
-def slide_contexto(prs, texto):
+def slide_conteudo(prs, blocos, citacao=None, sz=40):
     slide = prs.slides.add_slide(layout_branco(prs))
     add_logo(slide)
-    add_textbox_conteudo(slide, [{'text': texto, 'bold': False, 'sz_pt': 32}], sz_pt=32)
-    return slide
-
-def slide_certo_errado(prs, numero, enunciado, citacao_idx=0):
-    slide = prs.slides.add_slide(layout_branco(prs))
-    add_logo(slide)
-    blocos = [
-        {'text': str(numero).zfill(2) + '. ' + enunciado, 'bold': True, 'sz_pt': 40},
-        {'text': '', 'bold': False, 'sz_pt': 40},
-        {'text': 'Certo (  )', 'bold': False, 'sz_pt': 40},
-        {'text': 'Errado (  )', 'bold': False, 'sz_pt': 40},
-    ]
-    add_textbox_conteudo(slide, blocos)
-    add_citacao(slide, CITACOES[citacao_idx % len(CITACOES)])
-    return slide
-
-def slide_multipla_escolha(prs, numero, enunciado, alternativas, citacao_idx=0):
-    slide = prs.slides.add_slide(layout_branco(prs))
-    add_logo(slide)
-    blocos = [
-        {'text': str(numero).zfill(2) + '. ' + enunciado, 'bold': True, 'sz_pt': 40},
-        {'text': '', 'bold': False, 'sz_pt': 28},
-    ]
-    for alt in alternativas:
-        blocos.append({'text': alt, 'bold': False, 'sz_pt': 40})
-    add_textbox_conteudo(slide, blocos, sz_pt=40 if len(alternativas) <= 3 else 34)
-    add_citacao(slide, CITACOES[citacao_idx % len(CITACOES)])
+    add_textbox_conteudo(slide, blocos, sz_pt=sz)
+    if citacao:
+        add_citacao(slide, citacao)
     return slide
 
 def slide_gabarito(prs, respostas):
@@ -162,76 +138,170 @@ def slide_encerramento(prs):
         slide.shapes.add_picture(enc, Emu(0), Emu(0), Emu(SLIDE_W), Emu(SLIDE_H))
     return slide
 
-def extrair_texto_docx(filepath):
+def extrair_paragrafos_docx(filepath):
     from docx import Document
     doc = Document(filepath)
-    return '\n'.join([p.text for p in doc.paragraphs])
+    return [p.text for p in doc.paragraphs]
 
-def extrair_texto_txt(filepath):
+def extrair_paragrafos_txt(filepath):
     with open(filepath, 'r', encoding='utf-8') as f:
-        return f.read()
+        return f.read().split('\n')
 
-def parse_questoes(texto):
+def parse_documento(paragrafos):
+    """
+    Parser robusto para documentos de questoes.
+    Identifica: titulo, questoes com alternativas, gabarito.
+    """
     blocos = []
-    linhas = texto.split('\n')
+    gabarito = {}
     i = 0
-    while i < len(linhas):
-        linha = linhas[i].strip()
-        match_q = re.match(r'^(?:Quest.o\\s*)?(\\d{1,3})[.)\\s]\\s*(.+)', linha, re.IGNORECASE)
+    n = len(paragrafos)
+
+    while i < n:
+        linha = paragrafos[i].strip()
+
+        if not linha:
+            i += 1
+            continue
+
+        # Detecta gabarito
+        if re.match(r'^gabarito', linha, re.IGNORECASE):
+            i += 1
+            # Tenta pegar respostas nas linhas seguintes
+            while i < n:
+                l = paragrafos[i].strip()
+                matches = re.findall(r'(\d{1,3})\s*[-.:)]\s*([A-Ea-e])', l)
+                for num_str, resp in matches:
+                    gabarito[int(num_str)] = resp.upper()
+                i += 1
+            break
+
+        # Detecta questao numerada: "01.", "1.", "01)", "Questao 01"
+        match_q = re.match(r'^(\d{1,3})\s*[.)\-]\s*(.+)', linha)
+        if not match_q:
+            match_q = re.match(r'^[Qq]uest[aãoõ]+\s*(\d{1,3})\s*[.)\-:]\s*(.*)', linha)
+
         if match_q:
             numero = int(match_q.group(1))
             enunciado = match_q.group(2).strip()
             i += 1
+
+            # Continua lendo o enunciado ate achar alternativa
             alternativas = []
-            while i < len(linhas):
-                l = linhas[i].strip()
-                match_alt = re.match(r'^[(\\s]*([A-Ea-e])[).\\s]+(.+)', l)
-                if match_alt:
-                    alternativas.append(match_alt.group(1).upper() + ') ' + match_alt.group(2).strip())
-                    i += 1
-                    continue
-                if re.match(r'^(Certo|Errado)', l, re.IGNORECASE):
-                    break
-                if re.match(r'^(?:Quest.o\\s*)?\\d{1,3}[.)\\s]', l, re.IGNORECASE):
-                    break
+            while i < n:
+                l = paragrafos[i].strip()
                 if not l:
                     i += 1
                     continue
-                enunciado += ' ' + l
-                i += 1
-            if alternativas:
-                blocos.append({'tipo': 'multipla_escolha', 'numero': numero, 'enunciado': enunciado, 'alternativas': alternativas})
-            else:
-                blocos.append({'tipo': 'certo_errado', 'numero': numero, 'enunciado': enunciado})
-        else:
-            if linha and not re.match(r'^(Gabarito|GABARITO)', linha, re.IGNORECASE):
-                contexto = linha
-                i += 1
-                while i < len(linhas):
-                    l = linhas[i].strip()
-                    if not l:
-                        i += 1
-                        break
-                    if re.match(r'^(?:Quest.o\\s*)?\\d{1,3}[.)\\s]', l, re.IGNORECASE):
-                        break
-                    contexto += ' ' + l
-                    i += 1
-                if len(contexto) > 20:
-                    blocos.append({'tipo': 'contexto', 'texto': contexto})
-            else:
-                i += 1
-    return blocos
 
-def parse_gabarito(texto):
-    respostas = {}
-    matches = re.findall(r'(\\d{1,3})\\s*[-.)]\\s*([A-Ea-eCE]|Certo|Errado)', texto, re.IGNORECASE)
-    for num, resp in matches:
-        n = int(num)
-        r = resp.strip().upper()
-        if r == 'CERTO': r = 'C'
-        elif r == 'ERRADO': r = 'E'
-        respostas[n] = r
-    return respostas
+                # Detecta alternativa: "A)", "A.", "(A)", "a)"
+                match_alt = re.match(r'^[(\s]*([A-Ea-e])\s*[.)]\s*(.+)', l)
+                if match_alt:
+                    letra = match_alt.group(1).upper()
+                    texto_alt = match_alt.group(2).strip()
+                    alternativas.append(letra + ') ' + texto_alt)
+                    i += 1
+                    continue
+
+                # Se comeca com numero, e proxima questao
+                if re.match(r'^\d{1,3}\s*[.)]\s*', l):
+                    break
+                if re.match(r'^[Qq]uest[aãoõ]+\s*\d', l):
+                    break
+
+                # Detecta gabarito
+                if re.match(r'^gabarito', l, re.IGNORECASE):
+                    break
+
+                # Se e texto sem ser alternativa, faz parte do enunciado
+                if not match_alt:
+                    enunciado += ' ' + l
+                i += 1
+
+            blocos.append({
+                'tipo': 'multipla_escolha' if alternativas else 'certo_errado',
+                'numero': numero,
+                'enunciado': enunciado,
+                'alternativas': alternativas,
+            })
+        else:
+            # Texto avulso (titulo, contexto, etc)
+            if len(linha) > 10:
+                blocos.append({
+                    'tipo': 'contexto',
+                    'texto': linha,
+                })
+            i += 1
+
+    return blocos, gabarito
+
+def gerar_pptx(blocos, gabarito, disciplina, assunto, professor):
+    prs = nova_prs()
+
+    # 1. Capa
+    slide_capa(prs, disciplina, assunto, 'Questoes', professor)
+
+    # 2. Slides de questoes
+    citacao_idx = 0
+    for bloco in blocos:
+        if bloco['tipo'] == 'contexto':
+            slide_conteudo(prs, [{'text': bloco['texto'], 'bold': False, 'sz_pt': 32}])
+        elif bloco['tipo'] == 'certo_errado':
+            items = [
+                {'text': str(bloco['numero']).zfill(2) + '. ' + bloco['enunciado'], 'bold': True, 'sz_pt': 36},
+                {'text': '', 'bold': False, 'sz_pt': 20},
+                {'text': 'Certo (  )', 'bold': False, 'sz_pt': 36},
+                {'text': 'Errado (  )', 'bold': False, 'sz_pt': 36},
+            ]
+            slide_conteudo(prs, items, citacao=CITACOES[citacao_idx % len(CITACOES)])
+            citacao_idx += 1
+        elif bloco['tipo'] == 'multipla_escolha':
+            alts = bloco.get('alternativas', [])
+            # Calcular tamanho da fonte baseado no conteudo
+            total_chars = len(bloco['enunciado']) + sum(len(a) for a in alts)
+            if total_chars > 800:
+                sz_enum = 28
+                sz_alt = 28
+            elif total_chars > 500:
+                sz_enum = 32
+                sz_alt = 32
+            else:
+                sz_enum = 36
+                sz_alt = 36
+
+            # Se o conteudo e muito grande, dividir em 2 slides
+            if total_chars > 900:
+                # Slide 1: enunciado
+                items1 = [
+                    {'text': str(bloco['numero']).zfill(2) + '. ' + bloco['enunciado'], 'bold': True, 'sz_pt': sz_enum},
+                ]
+                slide_conteudo(prs, items1)
+
+                # Slide 2: alternativas
+                items2 = []
+                for alt in alts:
+                    items2.append({'text': alt, 'bold': False, 'sz_pt': sz_alt})
+                slide_conteudo(prs, items2, citacao=CITACOES[citacao_idx % len(CITACOES)])
+            else:
+                # Tudo em 1 slide
+                items = [
+                    {'text': str(bloco['numero']).zfill(2) + '. ' + bloco['enunciado'], 'bold': True, 'sz_pt': sz_enum},
+                    {'text': '', 'bold': False, 'sz_pt': 14},
+                ]
+                for alt in alts:
+                    items.append({'text': alt, 'bold': False, 'sz_pt': sz_alt})
+                slide_conteudo(prs, items, citacao=CITACOES[citacao_idx % len(CITACOES)])
+
+            citacao_idx += 1
+
+    # 3. Gabarito
+    if gabarito:
+        slide_gabarito(prs, gabarito)
+
+    # 4. Encerramento
+    slide_encerramento(prs)
+
+    return prs
 
 @app.route('/api/health', methods=['GET'])
 def health():
@@ -248,43 +318,42 @@ def gerar_material():
         ext = arquivo.filename.rsplit('.', 1)[-1].lower()
         if ext not in ALLOWED_EXTENSIONS:
             return jsonify({'error': 'Formato nao suportado. Use .docx ou .txt'}), 400
+
         disciplina = request.form.get('disciplina', 'DISCIPLINA')
         assunto = request.form.get('assunto', 'ASSUNTO')
         professor = request.form.get('professor', 'Professor')
+
         filename = secure_filename(arquivo.filename)
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         arquivo.save(filepath)
+
         if ext == 'docx':
-            texto = extrair_texto_docx(filepath)
+            paragrafos = extrair_paragrafos_docx(filepath)
         else:
-            texto = extrair_texto_txt(filepath)
-        blocos = parse_questoes(texto)
-        gabarito = parse_gabarito(texto)
+            paragrafos = extrair_paragrafos_txt(filepath)
+
+        blocos, gabarito = parse_documento(paragrafos)
+
         if not blocos:
             return jsonify({'error': 'Nao foi possivel identificar questoes.'}), 400
-        prs = nova_prs()
-        slide_capa(prs, disciplina, assunto, 'Questoes', professor)
-        citacao_idx = 0
-        for bloco in blocos:
-            if bloco['tipo'] == 'contexto':
-                slide_contexto(prs, bloco['texto'])
-            elif bloco['tipo'] == 'certo_errado':
-                slide_certo_errado(prs, bloco['numero'], bloco['enunciado'], citacao_idx)
-                citacao_idx += 1
-            elif bloco['tipo'] == 'multipla_escolha':
-                slide_multipla_escolha(prs, bloco['numero'], bloco['enunciado'], bloco['alternativas'], citacao_idx)
-                citacao_idx += 1
-        if gabarito:
-            slide_gabarito(prs, gabarito)
-        slide_encerramento(prs)
+
+        prs = gerar_pptx(blocos, gabarito, disciplina, assunto, professor)
+
         nome_saida = 'Carranza_' + assunto.replace(' ', '_') + '.pptx'
         output_path = os.path.join(UPLOAD_FOLDER, nome_saida)
         prs.save(output_path)
+
         try:
             os.remove(filepath)
         except:
             pass
-        return send_file(output_path, as_attachment=True, download_name=nome_saida, mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation')
+
+        return send_file(
+            output_path,
+            as_attachment=True,
+            download_name=nome_saida,
+            mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        )
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': 'Erro: ' + str(e)}), 500
