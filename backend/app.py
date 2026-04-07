@@ -492,7 +492,7 @@ if __name__ == "__main__":
     i = 0
     questao_num = 0
     def _is_bold(p): return any(r.bold for r in p.runs if r.text.strip())
-    def _has_numpr(p): return p._element.find(f'.//{NS}numPr') is not None
+    def _has_numpr(p): return p._element.find('.//'+NS+'numPr') is not None
     while i < len(paras):
         para = paras[i]
         txt  = para.text.strip()
