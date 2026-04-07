@@ -333,6 +333,73 @@ def _parse_texto(texto):
 
 
 # ─────────────────────────────────────────────
+# Estimador de altura (regra inquebrável de margem inferior)
+# ─────────────────────────────────────────────
+
+# Área útil disponível para texto (EMU)
+# De TEXTO_Y até RODAPE_Y, com margem inferior de segurança de 100pt
+AREA_UTIL_TEXTO = (RODAPE_Y - TEXTO_Y) - int(40 * 12700)   # margem inferior de 40pt
+LARGURA_TEXTO_EMU = 11497455  # largura da caixa de texto
+
+# Fator de largura média por caractere Calibri (calibrado empiricamente)
+# EMU por caractere = sz_emu * FATOR_CHAR
+FATOR_CHAR = 0.42  # calibrado empiricamente para Calibri
+
+def _estimar_altura_paragrafo(texto, sz_emu):
+    """Estima a altura em EMU que um parágrafo ocupa no slide."""
+    if not texto.strip():
+        return int(sz_emu * 0.4)  # linha vazia = 40% da altura da fonte
+    chars_por_linha = LARGURA_TEXTO_EMU / (sz_emu * FATOR_CHAR)
+    n_linhas = max(1.0, len(texto) / chars_por_linha)
+    # Altura = n_linhas * sz * line_spacing (1.15)
+    return int(sz_emu * 1.15 * n_linhas)
+
+
+def _escolher_fonte(texto_enunciado, alternativas):
+    """Escolhe o tamanho de fonte baseado no total de caracteres."""
+    total = len(texto_enunciado) + sum(len(a) for a in alternativas)
+    if total > 1200:
+        return 406400   # 32pt
+    elif total > 800:
+        return 444500   # 35pt
+    elif total > 500:
+        return 482600   # 38pt
+    else:
+        return 533400   # 42pt
+
+
+def _distribuir_em_slides(texto_enunciado, alternativas, sz_emu):
+    """
+    Distribui enunciado + alternativas em grupos que cabem no slide.
+    Retorna lista de grupos: cada grupo é uma lista de parágrafos.
+    Regra inquebrável: nenhum grupo ultrapassa AREA_UTIL_TEXTO.
+    """
+    grupos = []
+    grupo_atual = []
+    altura_atual = 0
+
+    # Parágrafo do enunciado (sempre no primeiro slide)
+    h_enunciado = _estimar_altura_paragrafo(texto_enunciado, sz_emu)
+    grupo_atual.append({"text": texto_enunciado, "bold": True, "sz_emu": sz_emu})
+    altura_atual = h_enunciado
+
+    for alt in alternativas:
+        h_alt = _estimar_altura_paragrafo(alt, sz_emu)
+        if altura_atual + h_alt > AREA_UTIL_TEXTO and grupo_atual:
+            # Não cabe — fecha o grupo atual e começa novo
+            grupos.append(grupo_atual)
+            grupo_atual = []
+            altura_atual = 0
+        grupo_atual.append({"text": alt, "bold": False, "sz_emu": sz_emu})
+        altura_atual += h_alt
+
+    if grupo_atual:
+        grupos.append(grupo_atual)
+
+    return grupos
+
+
+# ─────────────────────────────────────────────
 # Builder principal
 # ─────────────────────────────────────────────
 
@@ -358,41 +425,30 @@ def _build_pptx(payload):
             enunciado    = s.get("enunciado", "")
             certo_errado = s.get("certo_errado", False)
             alternativas = s.get("alternativas", [])
-            prefixo = f"{str(numero).zfill(2)}. " if numero else ""
-            # Remover prefixo duplicado se o enunciado já começa com o número
+            # Montar texto do enunciado (evitar duplicar prefixo)
             if enunciado.startswith(f"{str(numero).zfill(2)}.") or enunciado.startswith(f"{numero}."):
                 texto_enunciado = enunciado
             else:
+                prefixo = f"{str(numero).zfill(2)}. " if numero else ""
                 texto_enunciado = prefixo + enunciado
-            # Fonte adaptativa
-            total_chars = len(texto_enunciado) + sum(len(a) for a in alternativas)
-            if total_chars > 900:
-                sz = 444500
-            elif total_chars > 600:
-                sz = 482600
-            else:
-                sz = 533400
-            paras = [{"text": texto_enunciado, "bold": True, "sz_emu": sz}]
             if certo_errado:
-                paras.append({"text": "Certo (  )",  "bold": False, "sz_emu": sz})
-                paras.append({"text": "Errado (  )", "bold": False, "sz_emu": sz})
+                sz = _escolher_fonte(texto_enunciado, ["Certo (  )", "Errado (  )"])
+                paras = [
+                    {"text": texto_enunciado, "bold": True,  "sz_emu": sz},
+                    {"text": "Certo (  )",    "bold": False, "sz_emu": sz},
+                    {"text": "Errado (  )",   "bold": False, "sz_emu": sz},
+                ]
                 _slide_conteudo(prs, paras, citacao=next(citacoes_iter))
             elif alternativas:
-                chars_enunciado = len(texto_enunciado)
-                if chars_enunciado > 400:
-                    max_slide1 = 3
-                elif chars_enunciado > 250:
-                    max_slide1 = 4
-                else:
-                    max_slide1 = 5
-                alts_1 = alternativas[:max_slide1]
-                alts_2 = alternativas[max_slide1:]
-                paras_1 = paras + [{"text": a, "bold": False, "sz_emu": sz} for a in alts_1]
-                _slide_conteudo(prs, paras_1, citacao=next(citacoes_iter) if not alts_2 else None)
-                if alts_2:
-                    paras_2 = [{"text": a, "bold": False, "sz_emu": sz} for a in alts_2]
-                    _slide_conteudo(prs, paras_2, citacao=next(citacoes_iter))
+                sz = _escolher_fonte(texto_enunciado, alternativas)
+                grupos = _distribuir_em_slides(texto_enunciado, alternativas, sz)
+                for gi, grupo in enumerate(grupos):
+                    # Citação só no último slide do grupo desta questão
+                    cit = next(citacoes_iter) if gi == len(grupos) - 1 else None
+                    _slide_conteudo(prs, grupo, citacao=cit)
             else:
+                sz = _escolher_fonte(texto_enunciado, [])
+                paras = [{"text": texto_enunciado, "bold": True, "sz_emu": sz}]
                 _slide_conteudo(prs, paras, citacao=next(citacoes_iter))
     gab = payload.get("gabarito")
     if gab and gab.get("questoes"):
