@@ -373,13 +373,51 @@ def health():
 def gerar():
     """
     POST /gerar
-    Body: JSON estruturado com slides e gabarito
+    Aceita FormData (arquivo + campos) OU JSON estruturado.
     Retorna: arquivo .pptx para download
     """
     try:
-        payload = request.get_json(force=True)
-        if not payload:
-            return jsonify({"erro": "Payload JSON vazio"}), 400
+        # Modo FormData (enviado pelo frontend)
+        if request.files or request.form:
+            arquivo = request.files.get("arquivo")
+            disciplina = request.form.get("disciplina", "DISCIPLINA")
+            assunto    = request.form.get("assunto",    "ASSUNTO")
+            professor  = request.form.get("professor",  "")
+            tipo       = request.form.get("tipo",       "QUESTÕES")
+            instrucoes = request.form.get("instrucoes", "")
+
+            if not arquivo:
+                return jsonify({"erro": "Arquivo não enviado"}), 400
+
+            # Ler conteúdo do arquivo
+            filename = arquivo.filename.lower()
+            if filename.endswith(".docx"):
+                import tempfile, subprocess
+                with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+                    arquivo.save(tmp.name)
+                    result = subprocess.run(
+                        ["python", "-m", "markitdown", tmp.name],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    texto = result.stdout
+            else:
+                texto = arquivo.read().decode("utf-8", errors="ignore")
+
+            slides_data, gabarito = _parse_texto(texto)
+            payload = {
+                "disciplina": disciplina,
+                "assunto":    assunto,
+                "tipo":       tipo,
+                "professor":  professor,
+                "slides":     slides_data,
+                "gabarito":   gabarito,
+            }
+        else:
+            # Modo JSON estruturado
+            payload = request.get_json(force=True)
+            if not payload:
+                return jsonify({"erro": "Payload vazio"}), 400
+
         buf = _build_pptx(payload)
         disc = payload.get("disciplina", "apresentacao").replace(" ", "_")
         ass  = payload.get("assunto", "").replace(" ", "_")
