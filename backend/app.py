@@ -169,19 +169,150 @@ def _parse_docx(filepath):
     from docx import Document
     doc = Document(filepath)
     slides, gqs, grs = [], [], []
-    RE_NUM = re.compile(r'^(\d{1,2})[.)]\s+(.+)', re.DOTALL)
+    RE_NUM  = re.compile(r'^(\d{1,2})[.)]\s+(.+)', re.DOTALL)
     RE_LETRA = re.compile(r'^[A-Ea-e]$')
-    RE_ALT = re.compile(r'^[A-Ea-e][).]\s+.+')
-    RE_CE = re.compile(r'^(certo|errado)[\s.(]', re.IGNORECASE)
-    RE_GAB = re.compile(r'^(\d{1,2})\.\s*([A-Ea-eCcEe])')
+
+def _parse_texto(texto):
+    linhas = [l.rstrip() for l in texto.splitlines()]
+    slides, gqs, grs = [], [], []
+    RE_Q = re.compile(r'^(\d{1,2})[.\-]\s+(.+)')
+    RE_A = re.compile(r'^[A-Ea-e][).]')
+    RE_G = re.compile(r'^GABARITO', re.IGNORECASE)
+    RE_GI = re.compile(r'(\d{1,2})\s*[-]\s*([A-Ea-eCcEe])\b')
+    i = 0
+    while i < len(linhas):
+        l = linhas[i].strip()
+        if RE_G.match(l):
+            bloco = l; i += 1
+            while i < len(linhas): bloco += ' ' + linhas[i].strip(); i += 1
+            for m in RE_GI.finditer(bloco): gqs.append(int(m.group(1))); grs.append(m.group(2).upper())
+            continue
+        m = RE_Q.match(l)
+        if m:
+            num = int(m.group(1)); ep = [m.group(2).strip()]; i += 1; alts = []; ce = False
+            while i < len(linhas):
+                ll = linhas[i].strip()
+                if not ll:
+                    i += 1
+                    if i < len(linhas) and (RE_Q.match(linhas[i].strip()) or RE_G.match(linhas[i].strip())): break
+                    continue
+                if RE_A.match(ll): alts.append(ll); i += 1
+                elif ll.lower().startswith('certo') or ll.lower().startswith('errado'): ce = True; i += 1
+                elif RE_Q.match(ll) or RE_G.match(ll): break
+                else: ep.append(ll); i += 1
+            slides.append({"tipo":"questao","numero":num,"enunciado":" ".join(ep),"certo_errado":ce,"alternativas":alts})
+            continue
+        if l and not RE_G.match(l):
+            cp = [l]; i += 1
+            while i < len(linhas):
+                ll = linhas[i].strip()
+                if RE_Q.match(ll) or RE_G.match(ll): break
+                if not ll:
+                    i += 1
+                    if i < len(linhas) and not linhas[i].strip(): break
+                    continue
+                cp.append(ll); i += 1
+            slides.append({"tipo":"contexto","texto":" ".join(cp)})
+            continue
+        i += 1
+    gab = {"questoes": gqs, "respostas": grs} if gqs else None
+    return slides, gab
+
+app = Flask(__name__)
+CORS(app, origins="*")
+
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+@app.route("/gerar", methods=["POST"])
+def gerar():
+    try:
+        if request.files or request.form:
+            arq = request.files.get("arquivo")
+            disc = request.form.get("disciplina","DISCIPLINA")
+            ass  = request.form.get("assunto","ASSUNTO")
+            prof = request.form.get("professor","")
+            tipo = request.form.get("tipo","QUESTOES")
+            if not arq: return jsonify({"erro":"Arquivo nao enviado"}), 400
+            if arq.filename.lower().endswith(".docx"):
+                with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+                    arq.save(tmp.name); path = tmp.name
+                try: sl, gab = _parse_docx(path)
+                finally: os.unlink(path)
+            else:
+                texto = arq.read().decode("utf-8", errors="ignore")
+                sl, gab = _parse_texto(texto)
+            payload = {"disciplina":disc,"assunto":ass,"tipo":tipo,"professor":prof,"slides":sl,"gabarito":gab}
+        else:
+            payload = request.get_json(force=True)
+            if not payload: return jsonify({"erro":"Payload vazio"}), 400
+        buf = _build_pptx(payload)
+        d = payload.get("disciplina","apresentacao").replace(" ","_")
+        a = payload.get("assunto","").replace(" ","_")
+        fn = "Carranza_" + d + "_" + a + ".pptx" if a else "Carranza_" + d + ".pptx"
+        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                         as_attachment=True, download_name=fn)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"erro": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)), debug=False)
+)
+    RE_ALT  = re.compile(r'^\([A-Ea-e]\)\s+.+|^[A-Ea-e][).]\s+.+')
+    RE_CE   = re.compile(r'^(certo|errado)[\s.(]', re.IGNORECASE)
+    RE_GAB_CELL = re.compile(r'^(\d{1,2})\.\s*([A-Ea-eCcEe])')
+    RE_GAB_TX   = re.compile(r'(\d{1,2})\s*([A-Ea-e])\b')
+    def ib(p): return any(r.bold for r in p.runs if r.text.strip())
+    def hn(p): return p._element.find('.//' + WS_NS + 'numPr') is not None
+    # Gabarito em tabela
     for tbl in doc.tables:
         for row in tbl.rows:
             for cell in row.cells:
-                m = RE_GAB.match(cell.text.strip())
+                m = RE_GAB_CELL.match(cell.text.strip())
                 if m: gqs.append(int(m.group(1))); grs.append(m.group(2).upper())
+    # Agrupar parágrafos em blocos separados por linha vazia
+    blocos = []
+    bloco = []
+    for para in doc.paragraphs:
+        txt = para.text.strip()
+        if not txt:
+            if bloco: blocos.append(bloco); bloco = []
+        else:
+            bloco.append(para)
+    if bloco: blocos.append(bloco)
+    # Detectar padrão: se todos blocos têm alternativas claras → parsear por bloco
+    tem_alts = sum(1 for b in blocos if any(RE_ALT.match(p.text.strip()) for p in b))
+    usa_blocos = tem_alts >= 2
+    if usa_blocos:
+        qnum = 0
+        for bloco in blocos:
+            txts = [p.text.strip() for p in bloco]
+            bolds = [ib(p) for p in bloco]
+            # GABARITO
+            if any(t.upper() == 'GABARITO' for t in txts):
+                for t in txts:
+                    for m in RE_GAB_TX.finditer(t):
+                        gqs.append(int(m.group(1))); grs.append(m.group(2).upper())
+                continue
+            alts_idx = [i for i, t in enumerate(txts) if RE_ALT.match(t)]
+            if not alts_idx:
+                slides.append({'tipo':'contexto','texto':' '.join(txts)})
+                continue
+            first_alt = alts_idx[0]
+            enc_parts = txts[:first_alt]
+            alts = [txts[j] for j in alts_idx]
+            enc_txt = ' '.join(enc_parts) if enc_parts else txts[0] if txts else ''
+            m_num = RE_NUM.match(enc_txt) if enc_txt else None
+            if m_num: qnum = int(m_num.group(1))
+            else: qnum += 1
+            ce = len(alts) > 0 and all(RE_CE.match(a) for a in alts)
+            slides.append({'tipo':'questao','numero':qnum,'enunciado':enc_txt,'certo_errado':ce,'alternativas':alts if not ce else []})
+        gab = {"questoes": gqs, "respostas": grs} if gqs else None
+        return slides, gab
+    # Parsear parágrafo a parágrafo (padrões 1 e 2)
     paras = doc.paragraphs
-    def ib(p): return any(r.bold for r in p.runs if r.text.strip())
-    def hn(p): return p._element.find('.//' + WS_NS + 'numPr') is not None
     i, qnum = 0, 0
     while i < len(paras):
         para = paras[i]; txt = para.text.strip()
@@ -204,7 +335,7 @@ def _parse_docx(filepath):
                 else: extras.append(t2); i += 1
             enc2 = enc + ('\n' + '\n'.join(extras) if extras else '')
             ce = len(alts) > 0 and all(RE_CE.match(a) for a in alts)
-            slides.append({"tipo":"questao","numero":qnum,"enunciado":enc2,"certo_errado":ce,"alternativas":alts if not ce else []})
+            slides.append({'tipo':'questao','numero':qnum,'enunciado':enc2,'certo_errado':ce,'alternativas':alts if not ce else []})
             continue
         if para.style.name == 'List Paragraph' and hn(para) and txt:
             qnum += 1; enc = txt; i += 1; alts = []; extras = []
@@ -227,7 +358,7 @@ def _parse_docx(filepath):
                 i += 1
             enc2 = enc + ('\n' + '\n'.join(extras) if extras else '')
             ce = len(alts) > 0 and all(RE_CE.match(a) for a in alts)
-            slides.append({"tipo":"questao","numero":qnum,"enunciado":enc2,"certo_errado":ce,"alternativas":alts if not ce else []})
+            slides.append({'tipo':'questao','numero':qnum,'enunciado':enc2,'certo_errado':ce,'alternativas':alts if not ce else []})
             continue
         i += 1
     gab = {"questoes": gqs, "respostas": grs} if gqs else None
