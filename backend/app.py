@@ -96,7 +96,7 @@ def _slide_imagem(prs, img_bytes_b64, img_ext="png"):
     img_bytes = base64.b64decode(img_bytes_b64)
     try:
         from PIL import Image as PILImage
-        pil = PILImage.open(io.BytesIN(img_bytes))
+        pil = PILImage.open(io.BytesIO(img_bytes))
         orig_w, orig_h = pil.size
         scale_w = max_w / (orig_w * 9144)
         scale_h = max_h / (orig_h * 9144)
@@ -409,7 +409,11 @@ def _parse_texto(texto):
         if RE_G.match(l):
             bloco = l; i += 1
             while i < len(linhas): bloco += ' ' + linhas[i].strip(); i += 1
-            for m in RE_GI.finditer(bloco): gqs.append(int(m.group(2).strip()]; i += 1; alts = []; ce = False
+            for m in RE_GI.finditer(bloco): gqs.append(int(m.group(1))); grs.append(m.group(2).upper())
+            continue
+        m = RE_Q.match(l)
+        if m:
+            num = int(m.group(1)); ep = [m.group(2).strip()]; i += 1; alts = []; ce = False
             while i < len(linhas):
                 ll = linhas[i].strip()
                 if not ll:
