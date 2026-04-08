@@ -1,411 +1,250 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Carranza Cursos — Gerador de Materiais</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Carranza Cursos — Gerador de Slides</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #f4f1ee;
+    min-height: 100vh;
+  }
+  header {
+    background: linear-gradient(135deg, #70001C 0%, #4a0012 100%);
+    color: white;
+    padding: 20px 32px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+  }
+  header img { height: 56px; filter: brightness(0) invert(1); }
+  header .title { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
+  header .sub { font-size: 12px; opacity: 0.8; margin-top: 2px; font-style: italic; }
+  .container { max-width: 700px; margin: 40px auto; padding: 0 20px 60px; }
+  .card {
+    background: white;
+    border-radius: 12px;
+    padding: 28px 32px;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.07);
+    margin-bottom: 20px;
+  }
+  .card h2 { font-size: 16px; color: #70001C; margin-bottom: 18px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+  label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 5px; }
+  input[type=text], select, textarea {
+    width: 100%; padding: 10px 14px; border: 1.5px solid #ddd; border-radius: 8px;
+    font-size: 14px; color: #333; background: #fafafa; margin-bottom: 14px;
+    transition: border-color 0.2s;
+  }
+  input[type=text]:focus, select:focus, textarea:focus {
+    outline: none; border-color: #70001C; background: white;
+  }
+  textarea { resize: vertical; min-height: 60px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .upload-zone {
+    border: 2px dashed #ccc; border-radius: 10px; padding: 32px 20px;
+    text-align: center; cursor: pointer; transition: all 0.2s; color: #888;
+    background: #fafafa;
+  }
+  .upload-zone:hover, .upload-zone.drag { border-color: #70001C; background: #fff5f7; color: #70001C; }
+  .upload-zone.has-file { border-color: #70001C; background: #fff5f7; color: #70001C; }
+  .upload-zone .icon { font-size: 36px; margin-bottom: 8px; }
+  .upload-zone p { font-size: 14px; font-weight: 500; }
+  .upload-zone small { font-size: 12px; opacity: 0.7; }
+  input[type=file] { display: none; }
 
-    :root {
-      --vinho: #70001C;
-      --vinho-dark: #4a0012;
-      --vinho-light: #8a0022;
-      --bg: #f4f1ee;
-      --card: #ffffff;
-      --text: #1a1a1a;
-      --text-muted: #6b6b6b;
-      --border: #e2ddd8;
-      --radius: 14px;
-      --shadow: 0 2px 16px rgba(112,0,28,0.08);
-      --shadow-hover: 0 6px 32px rgba(112,0,28,0.14);
-    }
+  /* Checkbox IA */
+  .ia-box {
+    border: 1.5px solid #e8d5da;
+    border-radius: 10px;
+    padding: 16px 20px;
+    background: #fff8f9;
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-bottom: 0;
+  }
+  .ia-box:hover { border-color: #70001C; }
+  .ia-box.active { border-color: #70001C; background: #fff0f3; }
+  .ia-toggle {
+    width: 44px; height: 24px; border-radius: 12px; background: #ddd;
+    position: relative; flex-shrink: 0; transition: background 0.2s; margin-top: 2px;
+  }
+  .ia-toggle::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 20px; height: 20px; border-radius: 50%; background: white;
+    transition: left 0.2s; box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+  }
+  .ia-box.active .ia-toggle { background: #70001C; }
+  .ia-box.active .ia-toggle::after { left: 22px; }
+  .ia-text strong { font-size: 14px; color: #333; display: block; margin-bottom: 3px; }
+  .ia-text span { font-size: 12px; color: #888; line-height: 1.5; }
+  .ia-badge {
+    display: inline-block; background: #70001C; color: white;
+    font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 20px;
+    margin-left: 6px; vertical-align: middle; letter-spacing: 0.5px;
+  }
 
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-    }
+  .btn {
+    width: 100%; padding: 15px; background: #70001C; color: white;
+    border: none; border-radius: 10px; font-size: 16px; font-weight: 700;
+    cursor: pointer; transition: background 0.2s; margin-top: 20px;
+    letter-spacing: 0.5px;
+  }
+  .btn:hover { background: #4a0012; }
+  .btn:disabled { background: #ccc; cursor: not-allowed; }
+  .btn .spinner { display: none; }
+  .btn.loading .spinner { display: inline; }
+  .btn.loading .label { display: none; }
 
-    header {
-      background: linear-gradient(135deg, var(--vinho-dark) 0%, var(--vinho) 60%, var(--vinho-light) 100%);
-      padding: 0 24px;
-      height: 70px;
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      box-shadow: 0 2px 20px rgba(0,0,0,0.25);
-      position: sticky;
-      top: 0;
-      z-index: 100;
-    }
+  .msg { padding: 14px 18px; border-radius: 8px; font-size: 14px; margin-top: 16px; display: none; }
+  .msg.ok { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
+  .msg.err { background: #fdecea; color: #c62828; border: 1px solid #ffcdd2; }
 
-    .logo-wrap {
-      width: 46px;
-      height: 46px;
-      background: rgba(255,255,255,0.12);
-      border-radius: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-      flex-shrink: 0;
-      border: 1.5px solid rgba(255,255,255,0.2);
-    }
-
-    .logo-wrap img {
-      width: 38px;
-      height: 38px;
-      object-fit: contain;
-      filter: brightness(0) invert(1);
-    }
-
-    .header-text h1 { font-size: 17px; font-weight: 700; color: #fff; letter-spacing: -0.3px; }
-    .header-text p { font-size: 12px; color: rgba(255,255,255,0.65); font-weight: 400; }
-
-    main {
-      flex: 1;
-      display: flex;
-      align-items: flex-start;
-      justify-content: center;
-      padding: 40px 20px 60px;
-    }
-
-    .container { width: 100%; max-width: 620px; display: flex; flex-direction: column; gap: 20px; }
-
-    .page-title { text-align: center; margin-bottom: 4px; }
-    .page-title h2 { font-size: 26px; font-weight: 800; color: var(--vinho-dark); letter-spacing: -0.5px; }
-    .page-title p { font-size: 14px; color: var(--text-muted); margin-top: 6px; }
-
-    .card {
-      background: var(--card);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-      padding: 28px;
-      border: 1px solid var(--border);
-    }
-
-    .section-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--vinho); margin-bottom: 12px; }
-
-    .drop-zone {
-      border: 2px dashed var(--border);
-      border-radius: 10px;
-      padding: 32px 20px;
-      text-align: center;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      background: #faf9f8;
-    }
-    .drop-zone:hover, .drop-zone.drag-over { border-color: var(--vinho); background: #fff5f7; }
-
-    .drop-icon {
-      width: 48px; height: 48px;
-      background: linear-gradient(135deg, #fff0f3, #ffe4ea);
-      border-radius: 12px;
-      display: flex; align-items: center; justify-content: center;
-      margin: 0 auto 14px;
-      border: 1px solid rgba(112,0,28,0.12);
-    }
-    .drop-icon svg { color: var(--vinho); }
-    .drop-text { font-size: 14px; color: var(--text-muted); }
-    .drop-text span { color: var(--vinho); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
-    .drop-hint { font-size: 12px; color: #aaa; margin-top: 6px; }
-
-    .file-preview { display: none; align-items: center; gap: 14px; padding: 14px 16px; background: #f9f9f9; border: 1px solid var(--border); border-radius: 10px; }
-    .file-preview.visible { display: flex; }
-    .file-icon-wrap { width: 40px; height: 40px; background: linear-gradient(135deg, var(--vinho), var(--vinho-light)); border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-    .file-icon-wrap svg { color: #fff; }
-    .file-info { flex: 1; min-width: 0; }
-    .file-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .file-size { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
-    .btn-remove { background: none; border: none; cursor: pointer; color: #aaa; padding: 4px; border-radius: 6px; display: flex; transition: color 0.15s; }
-    .btn-remove:hover { color: var(--vinho); }
-    .type-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .type-btn { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border: 2px solid var(--border); border-radius: 10px; cursor: pointer; background: #faf9f8; transition: all 0.18s; text-align: left; }
-    .type-btn:hover { border-color: #c0a0a8; background: #fff; }
-    .type-btn.active { border-color: var(--vinho); background: #fff5f7; }
-    .type-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; background: #f0e8ea; }
-    .type-btn.active .type-icon { background: var(--vinho); }
-    .type-btn.active .type-icon svg { color: #fff; }
-    .type-icon svg { color: var(--vinho); }
-    .type-label { font-size: 13px; font-weight: 700; color: var(--text); }
-    .type-sub { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
-
-    .fields { display: flex; flex-direction: column; gap: 10px; }
-    .field-group { position: relative; }
-    .field-group label { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); margin-bottom: 5px; }
-    input[type=text], textarea { width: 100%; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: 8px; font-size: 14px; font-family: inherit; color: var(--text); background: #faf9f8; transition: border-color 0.15s, box-shadow 0.15s; outline: none; }
-    input[type=text]:focus, textarea:focus { border-color: var(--vinho); background: #fff; box-shadow: 0 0 0 3px rgba(112,0,28,0.08); }
-    textarea { resize: vertical; min-height: 80px; }
-    .badge-optional { display: inline-block; font-size: 10px; font-weight: 600; background: #f0ece8; color: var(--text-muted); border-radius: 20px; padding: 2px 7px; margin-left: 6px; vertical-align: middle; text-transform: none; letter-spacing: 0; }
-
-    .btn-gerar { width: 100%; padding: 16px; background: linear-gradient(135deg, var(--vinho-dark), var(--vinho)); color: #fff; font-size: 15px; font-weight: 700; border: none; border-radius: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; transition: all 0.2s; letter-spacing: 0.2px; box-shadow: 0 4px 16px rgba(112,0,28,0.3); }
-    .btn-gerar:hover { background: linear-gradient(135deg, #38000e, var(--vinho-dark)); box-shadow: 0 6px 24px rgba(112,0,28,0.4); transform: translateY(-1px); }
-    .btn-gerar:active { transform: translateY(0); }
-    .btn-gerar:disabled { background: #ccc; box-shadow: none; cursor: not-allowed; transform: none; }
-
-    .spinner { width: 18px; height: 18px; border: 2.5px solid rgba(255,255,255,0.35); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: none; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .loading .spinner { display: block; }
-    .loading .btn-text { opacity: 0.7; }
-
-    .msg { display: none; align-items: center; gap: 10px; padding: 14px 16px; border-radius: 10px; font-size: 13px; font-weight: 500; }
-    .msg.visible { display: flex; }
-    .msg-error { background: #fff5f5; border: 1px solid #ffd5d5; color: #c00; }
-    .msg-success { background: #f0fff4; border: 1px solid #b2f0c8; color: #1a7a3a; }
-
-    footer { text-align: center; padding: 24px; font-size: 12px; color: var(--text-muted); }
-    footer strong { color: var(--vinho); }
-    .footer-quote { font-style: italic; color: var(--vinho); font-size: 13px; margin-bottom: 6px; font-weight: 500; }
-  </style>
+  .tip {
+    font-size: 12px; color: #999; text-align: center; margin-top: 10px; line-height: 1.6;
+  }
+</style>
 </head>
 <body>
 
 <header>
-  <div class="logo-wrap">
-    <img src="https://raw.githubusercontent.com/ricartwitch/carranza-gerador/main/backend/assets/logo_carranza.png"
-         alt="Carranza Cursos"
-         onerror="this.style.display='none'" />
-  </div>
-  <div class="header-text">
-    <h1>Carranza Cursos</h1>
-    <p>Gerador de Materiais</p>
+  <img src="https://raw.githubusercontent.com/ricartwitch/carranza-gerador/main/backend/assets/logo_carranza.png" alt="Carranza" onerror="this.style.display='none'">
+  <div>
+    <div class="title">Carranza Cursos</div>
+    <div class="sub">Gerador de Slides para Questões</div>
   </div>
 </header>
 
-<main>
-  <div class="container">
+<div class="container">
 
-    <div class="page-title">
-      <h2>Gerar Apresentação</h2>
-      <p>Envie suas questões e gere slides no padrão Carranza em segundos</p>
+  <div class="card">
+    <h2>📁 Arquivo</h2>
+    <div class="upload-zone" id="zone" onclick="document.getElementById('file').click()">
+      <div class="icon">📄</div>
+      <p id="zone-txt">Clique ou arraste o arquivo aqui</p>
+      <small>.docx ou .txt</small>
     </div>
-
-    <div class="card">
-      <div class="section-label">Documento de referência</div>
-      <div class="drop-zone" id="dropzone" onclick="document.getElementById('fileInput').click()">
-        <div class="drop-icon">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 16V4M12 4L8 8M12 4L16 8"/>
-            <path d="M20 16v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2"/>
-          </svg>
-        </div>
-        <p class="drop-text">Arraste um arquivo ou <span>clique para selecionar</span></p>
-        <p class="drop-hint">.docx ou .txt</p>
-        <input type="file" id="fileInput" accept=".docx,.txt" style="display:none" onchange="handleFile(event)">
-      </div>
-      <div class="file-preview" id="filePreview">
-        <div class="file-icon-wrap">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/>
-          </svg>
-        </div>
-        <div class="file-info">
-          <div class="file-name" id="fileName">—</div>
-          <div class="file-size" id="fileSize">—</div>
-        </div>
-        <button class="btn-remove" onclick="removeFile()" title="Remover">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="section-label">Tipo de material</div>
-      <div class="type-grid">
-        <button class="type-btn active" onclick="setType('slides', this)" type="button">
-          <div class="type-icon">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
-            </svg>
-          </div>
-          <div>
-            <div class="type-label">Slides</div>
-            <div class="type-sub">Apresentação PowerPoint</div>
-          </div>
-        </button>
-        <button class="type-btn" onclick="setType('td', this)" type="button">
-          <div class="type-icon">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
-            </svg>
-          </div>
-          <div>
-            <div class="type-label">Trabalho Dirigido</div>
-            <div class="type-sub">Documento Word formatado</div>
-          </div>
-        </button>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="section-label">Informações da capa</div>
-      <div class="fields">
-        <div class="field-group">
-          <label>Disciplina</label>
-          <input type="text" id="disciplina" placeholder="ex: Direito Constitucional" />
-        </div>
-        <div class="field-group">
-          <label>Assunto</label>
-          <input type="text" id="assunto" placeholder="ex: Questões IDECAN" />
-        </div>
-        <div class="field-group">
-          <label>Professor</label>
-          <input type="text" id="professor" placeholder="ex: Prof. Fernando C. Branco" />
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="section-label">
-        Instruções adicionais
-        <span class="badge-optional">opcional</span>
-      </div>
-      <textarea id="instrucoes" placeholder="Ex: fazer apenas as questões, incluindo o gabarito."></textarea>
-    </div>
-
-    <div class="msg msg-error" id="msgError">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-      </svg>
-      <span id="errorText">Erro desconhecido</span>
-    </div>
-
-    <div class="msg msg-success" id="msgSuccess">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-        <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-      </svg>
-      <span>Material gerado com sucesso! O download iniciou automaticamente.</span>
-    </div>
-
-    <button class="btn-gerar" id="btnGerar" onclick="gerarMaterial()">
-      <div class="spinner" id="spinner"></div>
-      <svg class="btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-      </svg>
-      <span class="btn-text">Gerar Material</span>
-    </button>
-
+    <input type="file" id="file" accept=".docx,.txt" onchange="onFile(this)">
   </div>
-</main>
 
-<footer>
-  <div class="footer-quote">"Desistir não é opção de gabarito"</div>
-  <strong>Carranza Cursos</strong> © 2025 · Gerador de Materiais
-</footer>
+  <div class="card">
+    <h2>📋 Informações</h2>
+    <div class="row">
+      <div>
+        <label>Disciplina</label>
+        <input type="text" id="disciplina" placeholder="Ex: Língua Portuguesa">
+      </div>
+      <div>
+        <label>Tipo</label>
+        <select id="tipo">
+          <option value="QUESTOES">Questões</option>
+          <option value="SLIDES">Slides</option>
+          <option value="REVISAO">Revisão</option>
+          <option value="SIMULADO">Simulado</option>
+        </select>
+      </div>
+    </div>
+    <label>Assunto</label>
+    <input type="text" id="assunto" placeholder="Ex: Crase">
+    <label>Professor</label>
+    <input type="text" id="professor" placeholder="Ex: Prof. Silva">
+  </div>
+
+  <div class="card">
+    <h2>⚙️ Opções</h2>
+    <div class="ia-box" id="ia-box" onclick="toggleIA()">
+      <div class="ia-toggle" id="ia-toggle"></div>
+      <div class="ia-text">
+        <strong>Usar IA para interpretar o documento <span class="ia-badge">NOVO</span></strong>
+        <span>Ative quando o gerador não conseguir ler o Word corretamente.<br>
+        A IA analisa qualquer formato de documento e extrai as questões automaticamente.</span>
+      </div>
+    </div>
+  </div>
+
+  <button class="btn" id="btn" onclick="gerar()">
+    <span class="label">⚡ Gerar Slides</span>
+    <span class="spinner">⏳ Gerando...</span>
+  </button>
+
+  <div class="msg" id="msg"></div>
+  <p class="tip">Os slides serão baixados automaticamente no formato .pptx</p>
+
+</div>
 
 <script>
-  const API_URL = 'https://carranza-gerador.onrender.com';
-  let selectedFile = null;
-  let selectedType = 'slides';
+const API = 'https://carranza-gerador.onrender.com';
+let usarIA = false;
 
-  function handleFile(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    selectedFile = file;
-    document.getElementById('dropzone').style.display = 'none';
-    const preview = document.getElementById('filePreview');
-    preview.classList.add('visible');
-    document.getElementById('fileName').textContent = file.name;
-    document.getElementById('fileSize').textContent = formatSize(file.size);
-    hideMessages();
-  }
+function toggleIA() {
+  usarIA = !usarIA;
+  document.getElementById('ia-box').classList.toggle('active', usarIA);
+}
 
-  function removeFile() {
-    selectedFile = null;
-    document.getElementById('fileInput').value = '';
-    document.getElementById('dropzone').style.display = '';
-    document.getElementById('filePreview').classList.remove('visible');
-    hideMessages();
-  }
+function onFile(input) {
+  const f = input.files[0];
+  if (!f) return;
+  const zone = document.getElementById('zone');
+  zone.classList.add('has-file');
+  document.getElementById('zone-txt').textContent = '✅ ' + f.name;
+}
 
-  function formatSize(bytes) {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  }
+const zone = document.getElementById('zone');
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+zone.addEventListener('drop', e => {
+  e.preventDefault(); zone.classList.remove('drag');
+  const f = e.dataTransfer.files[0];
+  if (f) { document.getElementById('file').files = e.dataTransfer.files; onFile(document.getElementById('file')); }
+});
 
-  const dz = document.getElementById('dropzone');
-  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
-  dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
-  dz.addEventListener('drop', e => {
-    e.preventDefault();
-    dz.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (file) handleFile({ target: { files: [file] } });
-  });
+function showMsg(txt, ok) {
+  const m = document.getElementById('msg');
+  m.textContent = txt; m.className = 'msg ' + (ok ? 'ok' : 'err'); m.style.display = 'block';
+}
 
-  function setType(type, btn) {
-    selectedType = type;
-    document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    hideMessages();
-  }
+async function gerar() {
+  const file = document.getElementById('file').files[0];
+  if (!file) { showMsg('Por favor selecione um arquivo .docx ou .txt', false); return; }
 
-  function hideMessages() {
-    document.getElementById('msgError').classList.remove('visible');
-    document.getElementById('msgSuccess').classList.remove('visible');
-  }
+  const btn = document.getElementById('btn');
+  btn.disabled = true; btn.classList.add('loading');
+  document.getElementById('msg').style.display = 'none';
 
-  function showError(msg) {
-    document.getElementById('errorText').textContent = msg;
-    document.getElementById('msgError').classList.add('visible');
-    document.getElementById('msgSuccess').classList.remove('visible');
-  }
+  try {
+    const fd = new FormData();
+    fd.append('arquivo', file);
+    fd.append('disciplina', document.getElementById('disciplina').value || 'DISCIPLINA');
+    fd.append('assunto', document.getElementById('assunto').value || '');
+    fd.append('professor', document.getElementById('professor').value || '');
+    fd.append('tipo', document.getElementById('tipo').value);
+    fd.append('usar_ia', usarIA ? '1' : '0');
 
-  function showSuccess() {
-    document.getElementById('msgSuccess').classList.add('visible');
-    document.getElementById('msgError').classList.remove('visible');
-  }
+    const resp = await fetch(API + '/gerar', { method: 'POST', body: fd });
 
-  async function gerarMaterial() {
-    if (!selectedFile) {
-      showError('Por favor, selecione um arquivo .docx ou .txt antes de gerar.');
-      return;
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.erro || 'Erro ' + resp.status);
     }
-    const btn = document.getElementById('btnGerar');
-    const icon = btn.querySelector('.btn-icon');
-    btn.disabled = true;
-    btn.classList.add('loading');
-    icon.style.display = 'none';
-    hideMessages();
-    try {
-      const formData = new FormData();
-      formData.append('arquivo', selectedFile);
-      formData.append('disciplina', document.getElementById('disciplina').value.trim());
-      formData.append('assunto', document.getElementById('assunto').value.trim());
-      formData.append('professor', document.getElementById('professor').value.trim());
-      formData.append('tipo', selectedType === 'slides' ? 'QUESTÕES' : 'TRABALHO DIRIGIDO');
-      formData.append('instrucoes', document.getElementById('instrucoes').value.trim());
-      const resp = await fetch(API_URL + '/gerar', { method: 'POST', body: formData });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ erro: 'Falha na requisição' }));
-        throw new Error(err.erro || 'Erro desconhecido do servidor');
-      }
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      const disc = document.getElementById('disciplina').value.trim().replace(/\s+/g, '_') || 'Material';
-      a.href = url;
-      a.download = 'Carranza_' + disc + '.pptx';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      showSuccess();
-    } catch (err) {
-      showError(err.message || 'Erro desconhecido. Tente novamente.');
-    } finally {
-      btn.disabled = false;
-      btn.classList.remove('loading');
-      icon.style.display = '';
-    }
+
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const disc = document.getElementById('disciplina').value.replace(/ /g,'_') || 'Carranza';
+    a.href = url; a.download = 'Carranza_' + disc + '.pptx'; a.click();
+    URL.revokeObjectURL(url);
+    showMsg('✅ Slides gerados com sucesso!', true);
+  } catch(e) {
+    showMsg('❌ Erro: ' + e.message, false);
+  } finally {
+    btn.disabled = false; btn.classList.remove('loading');
   }
+}
 </script>
 </body>
 </html>
