@@ -98,14 +98,11 @@ def _slide_imagem(prs, img_bytes_b64, img_ext="png"):
         from PIL import Image as PILImage
         pil = PILImage.open(io.BytesIO(img_bytes))
         orig_w, orig_h = pil.size
-        scale_w = max_w / (orig_w * 9144)
-        scale_h = max_h / (orig_h * 9144)
-        scale = min(scale_w, scale_h, 1.0)
+        scale = min(max_w / (orig_w * 9144), max_h / (orig_h * 9144), 1.0)
         w_emu = int(orig_w * 9144 * scale)
         h_emu = int(orig_h * 9144 * scale)
     except Exception:
-        w_emu = int(max_w * 0.8)
-        h_emu = int(max_h * 0.8)
+        w_emu = int(max_w * 0.8); h_emu = int(max_h * 0.8)
     left = (SLIDE_W - w_emu) // 2
     top = margin_y + (max_h - h_emu) // 2
     buf = io.BytesIO(img_bytes); buf.seek(0)
@@ -172,10 +169,8 @@ def _build_pptx(payload):
             _slide_conteudo(prs, [{"text": s.get("texto",""), "bold": True, "sz": 508000}])
             continue
         if tipo == "imagem":
-            img_b64 = s.get("img_b64","")
-            img_ext = s.get("img_ext","png")
-            if img_b64:
-                _slide_imagem(prs, img_b64, img_ext)
+            img_b64 = s.get("img_b64",""); img_ext = s.get("img_ext","png")
+            if img_b64: _slide_imagem(prs, img_b64, img_ext)
             continue
         num = s.get("numero",""); enc = s.get("enunciado","")
         alts = s.get("alternativas",[]); ce = s.get("certo_errado", False)
@@ -213,6 +208,69 @@ def _get_img_from_para(para, doc_part):
         return base64.b64encode(rel.target_part.blob).decode(), ext
     except Exception: return None
 
+def _extrair_texto_docx(filepath):
+    """Extrai texto bruto do docx para enviar ao Claude."""
+    from docx import Document
+    doc = Document(filepath)
+    linhas = []
+    for para in doc.paragraphs:
+        txt = para.text.strip()
+        if txt:
+            linhas.append(txt)
+        else:
+            linhas.append("")
+    return "\n".join(linhas)
+
+def _parse_via_claude(texto_bruto, disciplina="", assunto=""):
+    """Usa Claude API para extrair questões de qualquer formato de texto."""
+    import urllib.request, json as jsonlib
+    prompt = f"""Você é um extrator de questões de concurso. Analise o texto abaixo e extraia TODAS as questões.
+
+Retorne APENAS um JSON válido, sem texto antes ou depois, sem marcações markdown, com esta estrutura exata:
+{{
+  "questoes": [
+    {{
+      "numero": 1,
+      "enunciado": "texto completo do enunciado",
+      "alternativas": ["A) texto", "B) texto", "C) texto", "D) texto", "E) texto"],
+      "certo_errado": false
+    }}
+  ],
+  "gabarito": {{
+    "questoes": [1, 2, 3],
+    "respostas": ["A", "B", "C"]
+  }}
+}}
+
+Regras:
+- Capture o enunciado COMPLETO incluindo textos de apoio/excertos antes das alternativas
+- Alternativas sempre no formato "A) texto", "B) texto" etc
+- Se não houver gabarito no texto, retorne gabarito com listas vazias
+- Se for questão Certo/Errado, coloque certo_errado=true e alternativas=[]
+- Numere sequencialmente se não houver numeração explícita
+
+TEXTO:
+{texto_bruto[:8000]}
+"""
+    payload = jsonlib.dumps({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 4000,
+        "messages": [{"role": "user", "content": prompt}]
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={"Content-Type": "application/json", "anthropic-version": "2023-06-01"},
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = jsonlib.loads(resp.read())
+    txt = data["content"][0]["text"].strip()
+    # Limpar markdown se houver
+    if txt.startswith("```"): txt = "\n".join(txt.split("\n")[1:])
+    if txt.endswith("```"): txt = "\n".join(txt.split("\n")[:-1])
+    return jsonlib.loads(txt.strip())
+
 def _parse_docx(filepath):
     from docx import Document
     doc = Document(filepath)
@@ -221,6 +279,7 @@ def _parse_docx(filepath):
     RE_NUM      = re.compile(r'^(\d{1,2})\.\s+(.+)', re.DOTALL)
     RE_NUM_ONLY = re.compile(r'^(\d{1,2})\.\s*')
     RE_LETRA    = re.compile(r'^[A-Ea-e]' + '$')
+    RE_LETRA_SOLTA = re.compile(r'^([A-Ea-e])\s+(.+)', re.DOTALL)
     RE_ALT      = re.compile(r'^\([A-Ea-e]\)\s+.+|^[A-Ea-e][).]\s+.+')
     RE_CE       = re.compile(r'^(certo|errado)[\s.(]', re.IGNORECASE)
     RE_GAB_CELL = re.compile(r'^(\d{1,2})\.\s*([A-Ea-eCcEe])')
@@ -239,15 +298,23 @@ def _parse_docx(filepath):
                 else:
                     for mm in RE_GAB_TX.finditer(txt):
                         gqs.append(int(mm.group(1))); grs.append(mm.group(2).upper())
-    # Detectar padrao 4: tem "Alternativas" como separador
+    # Agrupar em blocos por linha vazia
+    blocos = []
+    bloco = []
+    for para in doc.paragraphs:
+        txt = para.text.strip(); is_img = has_img(para)
+        if not txt and not is_img:
+            if bloco: blocos.append(bloco); bloco = []
+        else: bloco.append(para)
+    if bloco: blocos.append(bloco)
+
+    # --- DETECÇÃO DE PADRÃO ---
+
+    # Padrão 4: "Alternativas" como separador
     tem_alt_sep = sum(1 for p in doc.paragraphs if RE_ALT_SEP.match(p.text.strip()))
     if tem_alt_sep >= 2:
-        # Padrao 4 (FGV/TJSC): processar sequencialmente com maquina de estados
         qnum = 0
-        state_num = None     # numero pendente
-        state_enc = []       # partes do enunciado
-        state_in_alts = False
-        state_alts = []      # lista de {'letra': x, 'texto': None}
+        state_num = None; state_enc = []; state_in_alts = False; state_alts = []
         def flush(slides, state_num, state_enc, state_alts, qnum):
             enc = ' '.join(e for e in state_enc if e)
             if state_num: qnum = state_num
@@ -258,18 +325,15 @@ def _parse_docx(filepath):
         for para in doc.paragraphs:
             txt = para.text.strip()
             if has_img(para):
-                # Fechar questão pendente antes da imagem
                 if state_in_alts or state_enc:
                     qnum = flush(slides, state_num, state_enc, state_alts, qnum)
                     state_num = None; state_enc = []; state_in_alts = False; state_alts = []
-                img_r = _get_img_from_para(para, doc_part)
-                if img_r:
-                    slides.append({'tipo':'imagem','img_b64':img_r[0],'img_ext':img_r[1]})
+                ir = _get_img_from_para(para, doc_part)
+                if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
                 continue
             if not txt: continue
             m = RE_NUM_ONLY.match(txt)
             if m:
-                # Nova questão — fechar anterior
                 if state_in_alts or state_enc:
                     qnum = flush(slides, state_num, state_enc, state_alts, qnum)
                 state_num = int(m.group(1))
@@ -278,31 +342,56 @@ def _parse_docx(filepath):
             if RE_ALT_SEP.match(txt):
                 state_in_alts = True; continue
             if state_in_alts:
-                if RE_LETRA.match(txt):
-                    state_alts.append({'letra': txt, 'texto': None})
-                elif state_alts and state_alts[-1]['texto'] is None:
-                    state_alts[-1]['texto'] = txt
+                if RE_LETRA.match(txt): state_alts.append({'letra': txt, 'texto': None})
+                elif state_alts and state_alts[-1]['texto'] is None: state_alts[-1]['texto'] = txt
                 continue
-            if state_num is not None:
-                state_enc.append(txt)
+            if state_num is not None: state_enc.append(txt)
         if state_in_alts or state_enc:
             flush(slides, state_num, state_enc, state_alts, qnum)
         gab = {"questoes": gqs, "respostas": grs} if gqs else None
         return slides, gab
-    # Agrupar em blocos por linha vazia
-    blocos = []
-    bloco = []
-    for para in doc.paragraphs:
-        txt = para.text.strip(); is_img = has_img(para)
-        if not txt and not is_img:
-            if bloco: blocos.append(bloco); bloco = []
-        else: bloco.append(para)
-    if bloco: blocos.append(bloco)
-    # Detectar padrao 3: alternativas com parenteses separadas por linha vazia
+
+    # Padrão 5: alternativas "A texto", "B texto" em blocos separados por linha vazia
+    def is_alt_block(bloco):
+        txts = [p.text.strip() for p in bloco]
+        if len(txts) < 4: return False
+        letras = []
+        for t in txts:
+            m = RE_LETRA_SOLTA.match(t)
+            if m: letras.append(m.group(1).upper())
+            else: return False
+        return letras == list('ABCDE')[:len(letras)]
+
+    tem_alt_blocos = sum(1 for b in blocos if is_alt_block(b))
+    if tem_alt_blocos >= 2:
+        qnum = 0; i = 0
+        while i < len(blocos):
+            bloco = blocos[i]
+            txts = [p.text.strip() for p in bloco]
+            if any('gabarito' in t.lower() for t in txts):
+                for t in txts:
+                    for m in RE_GAB_TX.finditer(t):
+                        gqs.append(int(m.group(1))); grs.append(m.group(2).upper())
+                i += 1; continue
+            if is_alt_block(bloco): i += 1; continue
+            enc = ' '.join(txts)
+            if i + 1 < len(blocos) and is_alt_block(blocos[i+1]):
+                qnum += 1
+                alts = []
+                for t in [p.text.strip() for p in blocos[i+1]]:
+                    m = RE_LETRA_SOLTA.match(t)
+                    if m: alts.append(m.group(1).upper() + ') ' + m.group(2).strip())
+                slides.append({'tipo':'questao','numero':qnum,'enunciado':enc,'certo_errado':False,'alternativas':alts})
+                i += 2
+            else:
+                slides.append({'tipo':'contexto','texto':enc}); i += 1
+        gab = {"questoes": gqs, "respostas": grs} if gqs else None
+        return slides, gab
+
+    # Padrão 3: blocos por linha vazia com alternativas (A), (B)...
     tem_alts_par = sum(1 for b in blocos
                        if any(p.text.strip().startswith('(') and RE_ALT.match(p.text.strip()) for p in b))
-    usa_blocos = tem_alts_par >= 2
-    if usa_blocos:
+    if tem_alts_par >= 2:
         qnum = 0
         for bloco in blocos:
             txts = [p.text.strip() for p in bloco]
@@ -331,9 +420,9 @@ def _parse_docx(filepath):
                 if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
         gab = {"questoes": gqs, "respostas": grs} if gqs else None
         return slides, gab
-    # Padroes 1 e 2 (bold / List Paragraph)
-    paras = doc.paragraphs
-    i, qnum = 0, 0
+
+    # Padrões 1 e 2: bold / List Paragraph
+    paras = doc.paragraphs; i, qnum = 0, 0
     while i < len(paras):
         para = paras[i]; txt = para.text.strip()
         if has_img(para):
@@ -458,11 +547,29 @@ def gerar():
             ass  = request.form.get("assunto","ASSUNTO")
             prof = request.form.get("professor","")
             tipo = request.form.get("tipo","QUESTOES")
+            usar_ia = request.form.get("usar_ia","0") == "1"
             if not arq: return jsonify({"erro":"Arquivo nao enviado"}), 400
             if arq.filename.lower().endswith(".docx"):
                 with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
                     arq.save(tmp.name); path = tmp.name
-                try: sl, gab = _parse_docx(path)
+                try:
+                    if usar_ia:
+                        # Modo IA: extrai texto e envia para Claude
+                        texto_bruto = _extrair_texto_docx(path)
+                        resultado = _parse_via_claude(texto_bruto, disc, ass)
+                        sl = []
+                        for q in resultado.get("questoes", []):
+                            sl.append({
+                                "tipo": "questao",
+                                "numero": q.get("numero", 0),
+                                "enunciado": q.get("enunciado", ""),
+                                "certo_errado": q.get("certo_errado", False),
+                                "alternativas": q.get("alternativas", [])
+                            })
+                        gab_raw = resultado.get("gabarito", {})
+                        gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
+                    else:
+                        sl, gab = _parse_docx(path)
                 finally: os.unlink(path)
             else:
                 texto = arq.read().decode("utf-8", errors="ignore")
