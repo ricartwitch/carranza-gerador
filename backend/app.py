@@ -277,7 +277,11 @@ TEXTO:
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
         data=payload,
-        headers={"Content-Type": "application/json", "anthropic-version": "2023-06-01"},
+        headers={
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": os.environ.get("ANTHROPIC_API_KEY", "")
+        },
         method="POST"
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
