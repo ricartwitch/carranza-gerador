@@ -438,6 +438,48 @@ def _parse_docx(filepath):
         gab = {"questoes": gqs, "respostas": grs} if gqs else None
         return slides, gab
 
+    # Padrão 6 (CEBRASPE): questões numeradas "01. texto" sem alternativas, certo/errado
+    # Gabarito na tabela como "01.V" ou "01.F"
+    RE_GAB_CE = re.compile(r'^(\d{1,2})\.\s*([VFvf])\b')
+    # Coletar gabarito V/F da tabela
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                for mm in RE_GAB_CE.finditer(cell.text.strip()):
+                    q_n = int(mm.group(1))
+                    letra = mm.group(2).upper()
+                    if q_n not in gqs:  # evitar duplicata com RE_GAB_CELL
+                        gqs.append(q_n)
+                        grs.append('C' if letra == 'V' else 'E')
+    tem_ce_tabela = any(RE_GAB_CE.search(c.text) for tbl in doc.tables for row in tbl.rows for c in row.cells)
+    tem_num_seq = sum(1 for p in doc.paragraphs if RE_NUM_ONLY.match(p.text.strip()))
+    nao_tem_alts = not (tem_alt_sep >= 2 or tem_alts_par >= 2 or tem_alt_blocos >= 2)
+    usa_cebraspe = tem_ce_tabela and tem_num_seq >= 2 and nao_tem_alts
+    if usa_cebraspe:
+        state_enc = []; state_qnum = None
+        def flush_ce(state_qnum, state_enc, slides):
+            if state_qnum and state_enc:
+                enc = ' '.join(e for e in state_enc if e)
+                slides.append({'tipo':'questao','numero':state_qnum,'enunciado':enc,'certo_errado':True,'alternativas':[]})
+        for para in doc.paragraphs:
+            txt = para.text.strip()
+            if has_img(para):
+                flush_ce(state_qnum, state_enc, slides)
+                state_qnum = None; state_enc = []
+                ir = _get_img_from_para(para, doc_part)
+                if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+                continue
+            if not txt or txt.upper() == 'GABARITO': continue
+            m = RE_NUM_ONLY.match(txt)
+            if m:
+                flush_ce(state_qnum, state_enc, slides)
+                state_qnum = int(m.group(1)); state_enc = [txt]
+            elif state_qnum is not None:
+                state_enc.append(txt)
+        flush_ce(state_qnum, state_enc, slides)
+        gab = {"questoes": gqs, "respostas": grs} if gqs else None
+        return slides, gab
+
     # Padrões 1 e 2: bold / List Paragraph
     paras = doc.paragraphs; i, qnum = 0, 0
     while i < len(paras):
