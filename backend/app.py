@@ -17,6 +17,8 @@ TEXTO_X,TEXTO_Y,TEXTO_CX,TEXTO_H = 347272,1074509,11497455,5200000
 RODAPE_X,RODAPE_Y,RODAPE_CX,RODAPE_CY = 3382781,6298579,8461946,400110
 CAPA_X,CAPA_Y,CAPA_CX,CAPA_CY = 2548009,2013228,7465441,2985433
 AREA_UTIL = (RODAPE_Y - TEXTO_Y) - int(40 * 12700)
+FAIXA_H = 190000   # faixa vinho no rodape (~15pt)
+FAIXA_Y = SLIDE_H - FAIXA_H
 LARGURA = 11497455
 FATOR = 0.42
 CITACOES = [
@@ -52,6 +54,18 @@ def _run(para, txt, bold=False, sz=635000, color=None):
     if color: r.font.color.rgb = color
     return r
 
+def _faixa_rodape(slide):
+    """Adiciona faixa vinho no rodapé de slides de conteúdo."""
+    from pptx.util import Pt
+    from pptx.dml.color import RGBColor
+    shape = slide.shapes.add_shape(
+        1,  # MSO_SHAPE_TYPE.RECTANGLE
+        Emu(0), Emu(FAIXA_Y), Emu(SLIDE_W), Emu(FAIXA_H)
+    )
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = RGBColor(0x70, 0x00, 0x1C)
+    shape.line.fill.background()  # sem borda
+
 def _slide_capa(prs, dados):
     s = prs.slides.add_slide(_blank(prs))
     _pic(s,"capa_background",0,0,SLIDE_W,SLIDE_H)
@@ -85,6 +99,7 @@ def _slide_conteudo(prs, paragrafos, citacao=None):
         tb2 = s.shapes.add_textbox(Emu(RODAPE_X),Emu(RODAPE_Y),Emu(RODAPE_CX),Emu(RODAPE_CY))
         p2 = tb2.text_frame.paragraphs[0]; p2.alignment = PP_ALIGN.RIGHT
         _run(p2, citacao, bold=True, sz=254000, color=VINHO)
+    _faixa_rodape(s)
 
 def _slide_imagem(prs, img_bytes_b64, img_ext="png"):
     s = prs.slides.add_slide(_blank(prs))
@@ -107,6 +122,7 @@ def _slide_imagem(prs, img_bytes_b64, img_ext="png"):
     top = margin_y + (max_h - h_emu) // 2
     buf = io.BytesIO(img_bytes); buf.seek(0)
     s.shapes.add_picture(buf, Emu(left), Emu(top), Emu(w_emu), Emu(h_emu))
+    _faixa_rodape(s)
 
 def _slide_gabarito(prs, qs, rs):
     s = prs.slides.add_slide(_blank(prs))
@@ -126,6 +142,7 @@ def _slide_gabarito(prs, qs, rs):
         p1 = c1.text_frame.paragraphs[0]; p1.alignment = PP_ALIGN.CENTER
         for ru in p1.runs:
             ru.font.bold = True; ru.font.size = Pt(18); ru.font.color.rgb = PRETO
+    _faixa_rodape(s)
 
 def _slide_enc(prs):
     s = prs.slides.add_slide(_blank(prs))
