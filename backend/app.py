@@ -96,7 +96,7 @@ def _slide_imagem(prs, img_bytes_b64, img_ext="png"):
     img_bytes = base64.b64decode(img_bytes_b64)
     try:
         from PIL import Image as PILImage
-        pil = PILImage.open(io.BytesIO(img_bytes))
+        pil = PILImage.open(io.BytesIN(img_bytes))
         orig_w, orig_h = pil.size
         scale_w = max_w / (orig_w * 9144)
         scale_h = max_h / (orig_h * 9144)
@@ -224,11 +224,12 @@ def _parse_docx(filepath):
     RE_ALT      = re.compile(r'^\([A-Ea-e]\)\s+.+|^[A-Ea-e][).]\s+.+')
     RE_CE       = re.compile(r'^(certo|errado)[\s.(]', re.IGNORECASE)
     RE_GAB_CELL = re.compile(r'^(\d{1,2})\.\s*([A-Ea-eCcEe])')
-    RE_GAB_TX = re.compile(r'!(\d{1,2})\s*([A-Ea-e])\b')
+    RE_GAB_TX   = re.compile(r'(\d{1,2})\s*([A-Ea-e])\b')
     RE_ALT_SEP  = re.compile(r'^Alternativas$', re.IGNORECASE)
     def ib(p): return any(r.bold for r in p.runs if r.text.strip())
     def hn(p): return p._element.find('.//' + WS_NS + 'numPr') is not None
     def has_img(p): return '<w:drawing' in p._element.xml
+    # Gabarito em tabela
     for tbl in doc.tables:
         for row in tbl.rows:
             for cell in row.cells:
@@ -238,13 +239,15 @@ def _parse_docx(filepath):
                 else:
                     for mm in RE_GAB_TX.finditer(txt):
                         gqs.append(int(mm.group(1))); grs.append(mm.group(2).upper())
+    # Detectar padrao 4: tem "Alternativas" como separador
     tem_alt_sep = sum(1 for p in doc.paragraphs if RE_ALT_SEP.match(p.text.strip()))
     if tem_alt_sep >= 2:
+        # Padrao 4 (FGV/TJSC): processar sequencialmente com maquina de estados
         qnum = 0
-        state_num = None
-        state_enc = []
+        state_num = None     # numero pendente
+        state_enc = []       # partes do enunciado
         state_in_alts = False
-        state_alts = []
+        state_alts = []      # lista de {'letra': x, 'texto': None}
         def flush(slides, state_num, state_enc, state_alts, qnum):
             enc = ' '.join(e for e in state_enc if e)
             if state_num: qnum = state_num
@@ -255,15 +258,18 @@ def _parse_docx(filepath):
         for para in doc.paragraphs:
             txt = para.text.strip()
             if has_img(para):
+                # Fechar questão pendente antes da imagem
                 if state_in_alts or state_enc:
                     qnum = flush(slides, state_num, state_enc, state_alts, qnum)
                     state_num = None; state_enc = []; state_in_alts = False; state_alts = []
-                ir_ = _get_img_from_para(para, doc_part)
-                if ir_: slides.append({'tipo':'imagem','img_b64':ir_[0],'img_ext':ir_[1]})
+                img_r = _get_img_from_para(para, doc_part)
+                if img_r:
+                    slides.append({'tipo':'imagem','img_b64':img_r[0],'img_ext':img_r[1]})
                 continue
             if not txt: continue
             m = RE_NUM_ONLY.match(txt)
             if m:
+                # Nova questão — fechar anterior
                 if state_in_alts or state_enc:
                     qnum = flush(slides, state_num, state_enc, state_alts, qnum)
                 state_num = int(m.group(1))
@@ -283,14 +289,16 @@ def _parse_docx(filepath):
             flush(slides, state_num, state_enc, state_alts, qnum)
         gab = {"questoes": gqs, "respostas": grs} if gqs else None
         return slides, gab
-    blocos = []; bloco = []
+    # Agrupar em blocos por linha vazia
+    blocos = []
+    bloco = []
     for para in doc.paragraphs:
         txt = para.text.strip(); is_img = has_img(para)
         if not txt and not is_img:
             if bloco: blocos.append(bloco); bloco = []
         else: bloco.append(para)
     if bloco: blocos.append(bloco)
-
+    # Detectar padrao 3: alternativas com parenteses separadas por linha vazia
     tem_alts_par = sum(1 for b in blocos
                        if any(p.text.strip().startswith('(') and RE_ALT.match(p.text.strip()) for p in b))
     usa_blocos = tem_alts_par >= 2
@@ -323,6 +331,7 @@ def _parse_docx(filepath):
                 if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
         gab = {"questoes": gqs, "respostas": grs} if gqs else None
         return slides, gab
+    # Padroes 1 e 2 (bold / List Paragraph)
     paras = doc.paragraphs
     i, qnum = 0, 0
     while i < len(paras):
@@ -386,17 +395,6 @@ def _parse_docx(filepath):
         i += 1
     gab = {"questoes": gqs, "respostas": grs} if gqs else None
     return slides, gab
-ppend(t2); i += 1; continue
-                if RE_ALT.match(t2): alts.append(t2); i += 1; continue
-                if not alts: extras.append(t2)
-                i += 1
-            enc2 = enc + ('\n' + '\n'.join(extras) if extras else '')
-            ce = len(alts) > 0 and all(RE_CE.match(a) for a in alts)
-            slides.append({'tipo':'questao','numero':qnum,'enunciado':enc2,'certo_errado':ce,'alternativas':alts if not ce else []})
-            continue
-        i += 1
-    gab = {"questoes": gqs, "respostas": grs} if gqs else None
-    return slides, gab
 
 def _parse_texto(texto):
     linhas = [l.rstrip() for l in texto.splitlines()]
@@ -411,11 +409,7 @@ def _parse_texto(texto):
         if RE_G.match(l):
             bloco = l; i += 1
             while i < len(linhas): bloco += ' ' + linhas[i].strip(); i += 1
-            for m in RE_GI.finditer(bloco): gqs.append(int(m.group(1))); grs.append(m.group(2).upper())
-            continue
-        m = RE_Q.match(l)
-        if m:
-            num = int(m.group(1)); ep = [m.group(2).strip()]; i += 1; alts = []; ce = False
+            for m in RE_GI.finditer(bloco): gqs.append(int(m.group(2).strip()]; i += 1; alts = []; ce = False
             while i < len(linhas):
                 ll = linhas[i].strip()
                 if not ll:
