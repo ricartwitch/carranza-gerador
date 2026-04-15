@@ -226,95 +226,242 @@ def _distribuir(te, alts, sz):
 def _gerar_docx(payload):
     """
     Gera um .docx formatado no padrao Carranza a partir de conteudo extraido de slides.
-    Usa o MODELO DOCUMENTO.docx como base (preserva header/footer com logos).
+    Usa o MODELO DOCUMENTO.docx como base, preservando:
+    - Capa com imagem de fundo (aguia)
+    - Header com logo Carranza Concursos
+    - Footer com barra de redes sociais
     Retorna um BytesIO com o .docx pronto.
     """
+    import copy as copymod
+
     # Copiar template para temp
     tmp_docx = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
     tmp_docx.close()
     shutil.copy2(MODELO_DOCX, tmp_docx.name)
 
     doc = DocxDocument(tmp_docx.name)
-
-    # ---- Limpar body (remove text boxes, imagens decorativas, paragrafos vazios) ----
     body = doc.element.body
-    sect_pr = body.find(qn('w:sectPr'))  # preservar sectPr
-    # Remover todos os paragrafos do body
+    children = list(body)
+    sect_pr = body.find(qn('w:sectPr'))
+
+    # ---- Identificar elementos da capa ----
+    # [0] = Background image text box (full-page aguia)
+    # [9] = Title text box (onde vai disciplina/assunto)
+    # Salvar capa (paragrafos 0 a 9) e remover o resto
+    WPS_TXBX = '{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}txbx'
+    V_TEXTBOX = '{urn:schemas-microsoft-com:vml}textbox'
+
+    cover_elements = []  # paragrafos da capa para preservar
+    title_textbox_para = None  # paragrafo com text box do titulo
+    bg_para = None  # paragrafo com background
+
+    drawing_count = 0
+    for i, child in enumerate(children):
+        if child.tag == qn('w:sectPr'):
+            continue
+        has_drawing = len(child.findall('.//' + qn('w:drawing'))) > 0
+        if has_drawing:
+            drawing_count += 1
+            if drawing_count == 1:
+                bg_para = child  # primeiro = background
+                cover_elements.append(child)
+            elif drawing_count == 2:
+                title_textbox_para = child  # segundo = text box titulo
+                cover_elements.append(child)
+            # Ignorar drawings 3+ (sobras do template)
+        else:
+            # Paragrafos vazios entre background e titulo fazem parte da capa
+            if drawing_count >= 1 and drawing_count <= 2 and i < 15:
+                cover_elements.append(child)
+
+    # (bg_para_copy removido - pagina final usa imagem diretamente)
+
+    # ---- Injetar texto no text box do titulo ----
+    disc = payload.get("disciplina", "DISCIPLINA")
+    ass = payload.get("assunto", "")
+    prof = payload.get("professor", "")
+    tipo = payload.get("tipo", "QUESTOES")
+
+    if title_textbox_para is not None:
+        # Encontrar o txbxContent dentro do text box
+        txbx_contents = title_textbox_para.findall('.//' + WPS_TXBX)
+        if not txbx_contents:
+            txbx_contents = title_textbox_para.findall('.//' + V_TEXTBOX)
+
+        for txbx in txbx_contents:
+            # Encontrar w:txbxContent
+            for txbc in txbx.findall('.//' + qn('w:txbxContent')):
+                # Limpar paragrafos existentes
+                for old_p in list(txbc):
+                    txbc.remove(old_p)
+
+                # Adicionar titulo da disciplina
+                lines = []
+                if disc: lines.append((disc.upper(), "56", True))
+                if ass: lines.append((ass.upper(), "40", True))
+                if tipo: lines.append((tipo.upper(), "28", False))
+                if prof: lines.append((prof, "24", False))
+
+                for text, sz, bold in lines:
+                    p_el = etree.SubElement(txbc, qn('w:p'))
+                    pPr = etree.SubElement(p_el, qn('w:pPr'))
+                    sp = etree.SubElement(pPr, qn('w:spacing'))
+                    sp.set(qn('w:after'), '80')
+                    sp.set(qn('w:line'), '240')
+                    sp.set(qn('w:lineRule'), 'auto')
+                    jc = etree.SubElement(pPr, qn('w:jc'))
+                    jc.set(qn('w:val'), 'center')
+                    r_el = etree.SubElement(p_el, qn('w:r'))
+                    rPr = etree.SubElement(r_el, qn('w:rPr'))
+                    if bold:
+                        etree.SubElement(rPr, qn('w:b'))
+                        etree.SubElement(rPr, qn('w:bCs'))
+                    color = etree.SubElement(rPr, qn('w:color'))
+                    color.set(qn('w:val'), '70001C')
+                    sz_el = etree.SubElement(rPr, qn('w:sz'))
+                    sz_el.set(qn('w:val'), sz)
+                    szCs = etree.SubElement(rPr, qn('w:szCs'))
+                    szCs.set(qn('w:val'), sz)
+                    fn = etree.SubElement(rPr, qn('w:rFonts'))
+                    fn.set(qn('w:ascii'), 'Calibri')
+                    fn.set(qn('w:hAnsi'), 'Calibri')
+                    t_el = etree.SubElement(r_el, qn('w:t'))
+                    t_el.text = text
+                break  # processar apenas o primeiro txbx
+
+    # ---- Remover TUDO do body exceto capa + sectPr ----
     for child in list(body):
         if child.tag == qn('w:sectPr'):
             continue
         body.remove(child)
 
+    # Re-inserir elementos da capa antes do sectPr
+    for elem in cover_elements:
+        body.insert(list(body).index(sect_pr), elem)
+
     # ---- Constantes de estilo ----
     VINHO_HEX = "70001C"
     FONT_NAME = "Calibri"
 
-    def add_styled_para(doc, text, font_size=11, bold=False, color_hex=None,
-                        alignment=None, space_before=0, space_after=120,
-                        font_name=FONT_NAME, italic=False):
-        """Adiciona um paragrafo estilizado ao documento."""
-        p = doc.add_paragraph()
-        run = p.add_run(text)
-        run.font.size = DocxPt(font_size)
-        run.font.name = font_name
-        run.font.bold = bold
-        run.font.italic = italic
-        if color_hex:
-            run.font.color.rgb = DocxRGB.from_string(color_hex)
-        if alignment:
-            p.alignment = alignment
-        pf = p.paragraph_format
-        pf.space_before = DocxPt(space_before)
-        pf.space_after = DocxPt(space_after)
-        return p
+    def _add_para_before_sectpr(text="", font_size=11, bold=False, color_hex=None,
+                                alignment=None, space_before=0, space_after=120,
+                                font_name=FONT_NAME, italic=False):
+        """Adiciona um paragrafo estilizado ANTES do sectPr."""
+        p_el = etree.SubElement(body, qn('w:p'))
+        # Mover para antes do sectPr
+        body.remove(p_el)
+        body.insert(list(body).index(sect_pr), p_el)
 
-    def add_separator(doc):
-        """Adiciona uma linha horizontal vinho como separador."""
-        p = doc.add_paragraph()
-        pf = p.paragraph_format
-        pf.space_before = DocxPt(4)
-        pf.space_after = DocxPt(4)
-        # Borda inferior no paragrafo
-        pPr = p._element.get_or_add_pPr()
+        # paragraph properties
+        pPr = etree.SubElement(p_el, qn('w:pPr'))
+        sp = etree.SubElement(pPr, qn('w:spacing'))
+        sp.set(qn('w:before'), str(int(space_before * 20)))
+        sp.set(qn('w:after'), str(int(space_after * 20)))
+        if alignment is not None:
+            jc = etree.SubElement(pPr, qn('w:jc'))
+            align_map = {WD_ALIGN_PARAGRAPH.CENTER: 'center', WD_ALIGN_PARAGRAPH.LEFT: 'left',
+                         WD_ALIGN_PARAGRAPH.RIGHT: 'right', WD_ALIGN_PARAGRAPH.JUSTIFY: 'both'}
+            jc.set(qn('w:val'), align_map.get(alignment, 'left'))
+
+        if not text:
+            return p_el
+
+        r_el = etree.SubElement(p_el, qn('w:r'))
+        rPr = etree.SubElement(r_el, qn('w:rPr'))
+        if bold:
+            etree.SubElement(rPr, qn('w:b'))
+            etree.SubElement(rPr, qn('w:bCs'))
+        if italic:
+            etree.SubElement(rPr, qn('w:i'))
+            etree.SubElement(rPr, qn('w:iCs'))
+        if color_hex:
+            c = etree.SubElement(rPr, qn('w:color'))
+            c.set(qn('w:val'), color_hex)
+        sz_val = str(int(font_size * 2))
+        sz_el = etree.SubElement(rPr, qn('w:sz'))
+        sz_el.set(qn('w:val'), sz_val)
+        szCs = etree.SubElement(rPr, qn('w:szCs'))
+        szCs.set(qn('w:val'), sz_val)
+        fn = etree.SubElement(rPr, qn('w:rFonts'))
+        fn.set(qn('w:ascii'), font_name)
+        fn.set(qn('w:hAnsi'), font_name)
+        t_el = etree.SubElement(r_el, qn('w:t'))
+        t_el.text = text
+        t_el.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+
+        return p_el
+
+    def _add_pagebreak():
+        """Adiciona quebra de pagina antes do sectPr."""
+        p_el = etree.SubElement(body, qn('w:p'))
+        body.remove(p_el)
+        body.insert(list(body).index(sect_pr), p_el)
+        r_el = etree.SubElement(p_el, qn('w:r'))
+        br = etree.SubElement(r_el, qn('w:br'))
+        br.set(qn('w:type'), 'page')
+        return p_el
+
+    def _add_separator():
+        """Adiciona linha horizontal vinho."""
+        p_el = _add_para_before_sectpr("", space_before=2, space_after=2)
+        pPr = p_el.find(qn('w:pPr'))
+        if pPr is None:
+            pPr = etree.SubElement(p_el, qn('w:pPr'))
         pBdr = etree.SubElement(pPr, qn('w:pBdr'))
         bottom = etree.SubElement(pBdr, qn('w:bottom'))
         bottom.set(qn('w:val'), 'single')
         bottom.set(qn('w:sz'), '12')
         bottom.set(qn('w:space'), '1')
         bottom.set(qn('w:color'), VINHO_HEX)
-        return p
+        return p_el
 
-    # ---- Pagina de capa ----
-    disc = payload.get("disciplina", "DISCIPLINA")
-    ass = payload.get("assunto", "")
-    prof = payload.get("professor", "")
-    tipo = payload.get("tipo", "QUESTOES")
+    def _add_questao_para(numero, enunciado):
+        """Adiciona paragrafo de questao com numero em vinho + enunciado."""
+        p_el = etree.SubElement(body, qn('w:p'))
+        body.remove(p_el)
+        body.insert(list(body).index(sect_pr), p_el)
 
-    # Espacamento para centralizar verticalmente na capa
-    for _ in range(8):
-        add_styled_para(doc, "", font_size=12)
+        pPr = etree.SubElement(p_el, qn('w:pPr'))
+        sp = etree.SubElement(pPr, qn('w:spacing'))
+        sp.set(qn('w:before'), '200')
+        sp.set(qn('w:after'), '80')
 
-    # Titulo principal
-    add_styled_para(doc, disc.upper(), font_size=28, bold=True,
-                    color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
-                    space_after=60)
+        # Run do numero (vinho, bold)
+        r1 = etree.SubElement(p_el, qn('w:r'))
+        rPr1 = etree.SubElement(r1, qn('w:rPr'))
+        etree.SubElement(rPr1, qn('w:b'))
+        etree.SubElement(rPr1, qn('w:bCs'))
+        c1 = etree.SubElement(rPr1, qn('w:color'))
+        c1.set(qn('w:val'), VINHO_HEX)
+        sz1 = etree.SubElement(rPr1, qn('w:sz'))
+        sz1.set(qn('w:val'), '22')
+        szCs1 = etree.SubElement(rPr1, qn('w:szCs'))
+        szCs1.set(qn('w:val'), '22')
+        fn1 = etree.SubElement(rPr1, qn('w:rFonts'))
+        fn1.set(qn('w:ascii'), 'Calibri')
+        fn1.set(qn('w:hAnsi'), 'Calibri')
+        t1 = etree.SubElement(r1, qn('w:t'))
+        t1.text = f"{numero}. "
+        t1.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
 
-    if ass:
-        add_styled_para(doc, ass.upper(), font_size=18, bold=True,
-                        color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
-                        space_after=60)
+        # Run do enunciado (preto)
+        r2 = etree.SubElement(p_el, qn('w:r'))
+        rPr2 = etree.SubElement(r2, qn('w:rPr'))
+        c2 = etree.SubElement(rPr2, qn('w:color'))
+        c2.set(qn('w:val'), '333333')
+        sz2 = etree.SubElement(rPr2, qn('w:sz'))
+        sz2.set(qn('w:val'), '22')
+        szCs2 = etree.SubElement(rPr2, qn('w:szCs'))
+        szCs2.set(qn('w:val'), '22')
+        fn2 = etree.SubElement(rPr2, qn('w:rFonts'))
+        fn2.set(qn('w:ascii'), 'Calibri')
+        fn2.set(qn('w:hAnsi'), 'Calibri')
+        t2 = etree.SubElement(r2, qn('w:t'))
+        t2.text = enunciado
+        return p_el
 
-    add_styled_para(doc, tipo.upper(), font_size=14, bold=False,
-                    color_hex="666666", alignment=WD_ALIGN_PARAGRAPH.CENTER,
-                    space_after=120)
-
-    if prof:
-        add_styled_para(doc, prof, font_size=13, bold=False,
-                        color_hex="444444", alignment=WD_ALIGN_PARAGRAPH.CENTER,
-                        space_after=0, italic=True)
-
-    # Quebra de pagina apos capa
-    doc.add_page_break()
+    # ---- Quebra de pagina apos capa ----
+    _add_pagebreak()
 
     # ---- Conteudo dos slides ----
     slides = payload.get("slides", [])
@@ -325,124 +472,89 @@ def _gerar_docx(payload):
         t = sl.get("tipo", "")
 
         if t == "secao":
-            # Divisor de secao — titulo grande em vinho
-            add_separator(doc)
-            titulo = sl.get("titulo", "")
-            add_styled_para(doc, titulo.upper(), font_size=16, bold=True,
-                            color_hex=VINHO_HEX, space_before=12, space_after=12)
-            add_separator(doc)
-            add_styled_para(doc, "", font_size=6, space_after=60)
+            _add_separator()
+            _add_para_before_sectpr(sl.get("titulo", "").upper(), font_size=14, bold=True,
+                                    color_hex=VINHO_HEX, space_before=6, space_after=6,
+                                    alignment=WD_ALIGN_PARAGRAPH.LEFT)
+            _add_separator()
+            _add_para_before_sectpr("", font_size=4, space_after=4)
 
         elif t == "conteudo_slide":
-            # Titulo do slide
             titulo = sl.get("titulo", "")
             if titulo:
-                add_styled_para(doc, titulo, font_size=13, bold=True,
-                                color_hex=VINHO_HEX, space_before=120, space_after=60)
-            # Paragrafos de conteudo
-            paragrafos = sl.get("paragrafos", [])
-            for para_text in paragrafos:
-                if not para_text.strip():
-                    continue
-                add_styled_para(doc, para_text, font_size=11, bold=False,
-                                color_hex="333333", space_before=0, space_after=60)
+                _add_para_before_sectpr(titulo, font_size=12, bold=True,
+                                        color_hex=VINHO_HEX, space_before=10, space_after=4)
+            for para_text in sl.get("paragrafos", []):
+                if para_text.strip():
+                    _add_para_before_sectpr(para_text, font_size=11, bold=False,
+                                            color_hex="333333", space_before=0, space_after=3,
+                                            alignment=WD_ALIGN_PARAGRAPH.JUSTIFY)
 
         elif t == "questao":
             num_questao += 1
             numero = sl.get("numero", num_questao)
             enunciado = sl.get("enunciado", "")
-            alternativas = sl.get("alternativas", [])
-            certo_errado = sl.get("certo_errado", False)
+            _add_questao_para(numero, enunciado)
 
-            # Numero + enunciado
-            p = doc.add_paragraph()
-            # Numero em vinho e bold
-            run_num = p.add_run(f"{numero}. ")
-            run_num.font.size = DocxPt(11)
-            run_num.font.name = FONT_NAME
-            run_num.font.bold = True
-            run_num.font.color.rgb = DocxRGB.from_string(VINHO_HEX)
-            # Enunciado em preto
-            run_en = p.add_run(enunciado)
-            run_en.font.size = DocxPt(11)
-            run_en.font.name = FONT_NAME
-            run_en.font.bold = False
-            run_en.font.color.rgb = DocxRGB.from_string("333333")
-            pf = p.paragraph_format
-            pf.space_before = DocxPt(120 if num_questao == 1 else 80)
-            pf.space_after = DocxPt(40)
-
-            if certo_errado:
-                add_styled_para(doc, "(   ) Certo    (   ) Errado", font_size=11,
-                                bold=False, color_hex="333333", space_before=20,
-                                space_after=60)
+            if sl.get("certo_errado", False):
+                _add_para_before_sectpr("(   ) Certo    (   ) Errado", font_size=11,
+                                        color_hex="333333", space_before=1, space_after=4)
             else:
-                for alt in alternativas:
-                    add_styled_para(doc, alt, font_size=11, bold=False,
-                                    color_hex="333333", space_before=0,
-                                    space_after=20)
-                # Espaco apos alternativas
-                if alternativas:
-                    add_styled_para(doc, "", font_size=4, space_after=40)
+                for alt in sl.get("alternativas", []):
+                    _add_para_before_sectpr(alt, font_size=11, color_hex="333333",
+                                            space_before=0, space_after=1)
 
         elif t == "contexto":
-            # Slide de contexto genérico
             texto = sl.get("texto", "")
             if texto:
-                add_styled_para(doc, texto, font_size=11, bold=False,
-                                color_hex="333333", space_before=60, space_after=60)
-
-        elif t == "imagem":
-            # Imagem extraida do slide
-            img_b64 = sl.get("img_b64", "")
-            img_ext = sl.get("img_ext", "png")
-            if img_b64:
-                try:
-                    img_data = base64.b64decode(img_b64)
-                    img_stream = io.BytesIO(img_data)
-                    p = doc.add_paragraph()
-                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    run = p.add_run()
-                    run.add_picture(img_stream, width=Inches(5.5))
-                    pf = p.paragraph_format
-                    pf.space_before = DocxPt(40)
-                    pf.space_after = DocxPt(40)
-                except Exception:
-                    add_styled_para(doc, "[Imagem não disponível]", font_size=10,
-                                    italic=True, color_hex="999999",
-                                    alignment=WD_ALIGN_PARAGRAPH.CENTER)
+                _add_para_before_sectpr(texto, font_size=11, color_hex="333333",
+                                        space_before=4, space_after=4,
+                                        alignment=WD_ALIGN_PARAGRAPH.JUSTIFY)
 
     # ---- Gabarito ----
     if gabarito and gabarito.get("questoes"):
-        doc.add_page_break()
-        add_separator(doc)
-        add_styled_para(doc, "GABARITO", font_size=16, bold=True,
-                        color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
-                        space_before=12, space_after=12)
-        add_separator(doc)
-        add_styled_para(doc, "", font_size=6, space_after=60)
-
+        _add_pagebreak()
+        _add_separator()
+        _add_para_before_sectpr("GABARITO", font_size=16, bold=True,
+                                color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                                space_before=6, space_after=6)
+        _add_separator()
+        _add_para_before_sectpr("", font_size=4, space_after=4)
         qs = gabarito.get("questoes", [])
         rs = gabarito.get("respostas", [])
-        # Montar gabarito em linhas de 5
-        linhas_gab = []
         for i in range(0, len(qs), 5):
             chunk_q = qs[i:i+5]
             chunk_r = rs[i:i+5]
             parts = [f"{q}) {r}" for q, r in zip(chunk_q, chunk_r)]
-            linhas_gab.append("     ".join(parts))
+            _add_para_before_sectpr("     ".join(parts), font_size=12, bold=True,
+                                    color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                                    space_before=0, space_after=3)
 
-        for linha in linhas_gab:
-            add_styled_para(doc, linha, font_size=12, bold=True,
-                            color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
-                            space_before=0, space_after=40)
+    # ---- Pagina final (encerramento) com imagem de fundo ----
+    _add_pagebreak()
+    try:
+        bg_path = os.path.join(ASSETS, "doc_background.jpeg")
+        if os.path.exists(bg_path):
+            # Adicionar imagem de fundo centralizada como pagina de encerramento
+            p_img = doc.add_paragraph()
+            p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run_img = p_img.add_run()
+            # A4 ajustado para nao sobrepor header/footer
+            run_img.add_picture(bg_path, width=Cm(14.5), height=Cm(20.5))
+            pf = p_img.paragraph_format
+            pf.space_before = DocxPt(0)
+            pf.space_after = DocxPt(0)
+            # Mover para antes do sectPr
+            body.remove(p_img._element)
+            body.insert(list(body).index(sect_pr), p_img._element)
+    except Exception:
+        pass  # se falhar, nao adiciona pagina final
 
     # ---- Salvar ----
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
 
-    # Limpar temp
     try: os.unlink(tmp_docx.name)
     except: pass
 
