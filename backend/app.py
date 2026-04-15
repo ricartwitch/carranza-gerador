@@ -1,4 +1,4 @@
-import os, io, re, traceback, tempfile, base64
+import os, io, re, traceback, tempfile, base64, shutil, copy
 from itertools import cycle
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
@@ -6,6 +6,11 @@ from pptx import Presentation
 from pptx.util import Emu, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
+from docx import Document as DocxDocument
+from docx.shared import Pt as DocxPt, Cm, Inches, RGBColor as DocxRGB, Emu as DocxEmu
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from lxml import etree
 
 SLIDE_W, SLIDE_H = 12192000, 6858000
 VINHO = RGBColor(0x70, 0x00, 0x1C)
@@ -28,6 +33,7 @@ CITACOES = [
     '"Nas tempestades, como a aguia, encontre o voo mais alto."',
 ]
 ASSETS = os.path.join(os.path.dirname(__file__), "assets")
+MODELO_DOCX = os.path.join(os.path.dirname(__file__), "assets", "MODELO_DOCUMENTO.docx")
 WS_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 NS_R  = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
 NS_A  = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
@@ -158,17 +164,18 @@ def _slide_conteudo_titulado(prs, titulo, paragrafos, citacao=None):
     """Slide de conteúdo com título em destaque + parágrafos abaixo."""
     s = prs.slides.add_slide(_blank(prs))
     _pic(s,"logo_carranza",LOGO_MASTER_X,LOGO_MASTER_Y,LOGO_MASTER_CX,LOGO_MASTER_CY)
-    # Título no topo
-    TITULO_Y = 420000
-    TITULO_H = 500000
-    tb_titulo = s.shapes.add_textbox(Emu(TEXTO_X), Emu(TITULO_Y), Emu(TEXTO_CX), Emu(TITULO_H))
+    # Título: abaixo da faixa, NÃO sobrepõe a logo (largura limitada)
+    TIT_Y = 350000
+    TIT_W = LOGO_MASTER_X - TEXTO_X - 200000   # para antes da logo
+    TIT_H = 650000
+    tb_titulo = s.shapes.add_textbox(Emu(TEXTO_X), Emu(TIT_Y), Emu(TIT_W), Emu(TIT_H))
     tf_t = tb_titulo.text_frame; tf_t.word_wrap = True
     pt = tf_t.paragraphs[0]; pt.alignment = PP_ALIGN.LEFT
     _run(pt, titulo.upper() if titulo else "", bold=True, sz=508000, color=VINHO)
-    # Conteúdo abaixo do título
-    CONTEUDO_Y = TITULO_Y + TITULO_H + 80000
-    CONTEUDO_H = RODAPE_Y - CONTEUDO_Y - int(20 * 12700)
-    tb = s.shapes.add_textbox(Emu(TEXTO_X), Emu(CONTEUDO_Y), Emu(TEXTO_CX), Emu(CONTEUDO_H))
+    # Conteúdo: começa ABAIXO da logo
+    CONT_Y = LOGO_MASTER_Y + LOGO_MASTER_CY + 80000  # logo bottom + margem
+    CONT_H = RODAPE_Y - CONT_Y - int(20 * 12700)
+    tb = s.shapes.add_textbox(Emu(TEXTO_X), Emu(CONT_Y), Emu(TEXTO_CX), Emu(CONT_H))
     tf = tb.text_frame; tf.word_wrap = True
     # Calcular tamanho da fonte baseado no volume de texto
     total_chars = sum(len(p) for p in paragrafos)
@@ -215,6 +222,232 @@ def _distribuir(te, alts, sz):
         altura += ha
     if grupo: grupos.append(grupo)
     return grupos
+
+def _gerar_docx(payload):
+    """
+    Gera um .docx formatado no padrao Carranza a partir de conteudo extraido de slides.
+    Usa o MODELO DOCUMENTO.docx como base (preserva header/footer com logos).
+    Retorna um BytesIO com o .docx pronto.
+    """
+    # Copiar template para temp
+    tmp_docx = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
+    tmp_docx.close()
+    shutil.copy2(MODELO_DOCX, tmp_docx.name)
+
+    doc = DocxDocument(tmp_docx.name)
+
+    # ---- Limpar body (remove text boxes, imagens decorativas, paragrafos vazios) ----
+    body = doc.element.body
+    sect_pr = body.find(qn('w:sectPr'))  # preservar sectPr
+    # Remover todos os paragrafos do body
+    for child in list(body):
+        if child.tag == qn('w:sectPr'):
+            continue
+        body.remove(child)
+
+    # ---- Constantes de estilo ----
+    VINHO_HEX = "70001C"
+    FONT_NAME = "Calibri"
+
+    def add_styled_para(doc, text, font_size=11, bold=False, color_hex=None,
+                        alignment=None, space_before=0, space_after=120,
+                        font_name=FONT_NAME, italic=False):
+        """Adiciona um paragrafo estilizado ao documento."""
+        p = doc.add_paragraph()
+        run = p.add_run(text)
+        run.font.size = DocxPt(font_size)
+        run.font.name = font_name
+        run.font.bold = bold
+        run.font.italic = italic
+        if color_hex:
+            run.font.color.rgb = DocxRGB.from_string(color_hex)
+        if alignment:
+            p.alignment = alignment
+        pf = p.paragraph_format
+        pf.space_before = DocxPt(space_before)
+        pf.space_after = DocxPt(space_after)
+        return p
+
+    def add_separator(doc):
+        """Adiciona uma linha horizontal vinho como separador."""
+        p = doc.add_paragraph()
+        pf = p.paragraph_format
+        pf.space_before = DocxPt(4)
+        pf.space_after = DocxPt(4)
+        # Borda inferior no paragrafo
+        pPr = p._element.get_or_add_pPr()
+        pBdr = etree.SubElement(pPr, qn('w:pBdr'))
+        bottom = etree.SubElement(pBdr, qn('w:bottom'))
+        bottom.set(qn('w:val'), 'single')
+        bottom.set(qn('w:sz'), '12')
+        bottom.set(qn('w:space'), '1')
+        bottom.set(qn('w:color'), VINHO_HEX)
+        return p
+
+    # ---- Pagina de capa ----
+    disc = payload.get("disciplina", "DISCIPLINA")
+    ass = payload.get("assunto", "")
+    prof = payload.get("professor", "")
+    tipo = payload.get("tipo", "QUESTOES")
+
+    # Espacamento para centralizar verticalmente na capa
+    for _ in range(8):
+        add_styled_para(doc, "", font_size=12)
+
+    # Titulo principal
+    add_styled_para(doc, disc.upper(), font_size=28, bold=True,
+                    color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                    space_after=60)
+
+    if ass:
+        add_styled_para(doc, ass.upper(), font_size=18, bold=True,
+                        color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                        space_after=60)
+
+    add_styled_para(doc, tipo.upper(), font_size=14, bold=False,
+                    color_hex="666666", alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                    space_after=120)
+
+    if prof:
+        add_styled_para(doc, prof, font_size=13, bold=False,
+                        color_hex="444444", alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                        space_after=0, italic=True)
+
+    # Quebra de pagina apos capa
+    doc.add_page_break()
+
+    # ---- Conteudo dos slides ----
+    slides = payload.get("slides", [])
+    gabarito = payload.get("gabarito")
+    num_questao = 0
+
+    for sl in slides:
+        t = sl.get("tipo", "")
+
+        if t == "secao":
+            # Divisor de secao — titulo grande em vinho
+            add_separator(doc)
+            titulo = sl.get("titulo", "")
+            add_styled_para(doc, titulo.upper(), font_size=16, bold=True,
+                            color_hex=VINHO_HEX, space_before=12, space_after=12)
+            add_separator(doc)
+            add_styled_para(doc, "", font_size=6, space_after=60)
+
+        elif t == "conteudo_slide":
+            # Titulo do slide
+            titulo = sl.get("titulo", "")
+            if titulo:
+                add_styled_para(doc, titulo, font_size=13, bold=True,
+                                color_hex=VINHO_HEX, space_before=120, space_after=60)
+            # Paragrafos de conteudo
+            paragrafos = sl.get("paragrafos", [])
+            for para_text in paragrafos:
+                if not para_text.strip():
+                    continue
+                add_styled_para(doc, para_text, font_size=11, bold=False,
+                                color_hex="333333", space_before=0, space_after=60)
+
+        elif t == "questao":
+            num_questao += 1
+            numero = sl.get("numero", num_questao)
+            enunciado = sl.get("enunciado", "")
+            alternativas = sl.get("alternativas", [])
+            certo_errado = sl.get("certo_errado", False)
+
+            # Numero + enunciado
+            p = doc.add_paragraph()
+            # Numero em vinho e bold
+            run_num = p.add_run(f"{numero}. ")
+            run_num.font.size = DocxPt(11)
+            run_num.font.name = FONT_NAME
+            run_num.font.bold = True
+            run_num.font.color.rgb = DocxRGB.from_string(VINHO_HEX)
+            # Enunciado em preto
+            run_en = p.add_run(enunciado)
+            run_en.font.size = DocxPt(11)
+            run_en.font.name = FONT_NAME
+            run_en.font.bold = False
+            run_en.font.color.rgb = DocxRGB.from_string("333333")
+            pf = p.paragraph_format
+            pf.space_before = DocxPt(120 if num_questao == 1 else 80)
+            pf.space_after = DocxPt(40)
+
+            if certo_errado:
+                add_styled_para(doc, "(   ) Certo    (   ) Errado", font_size=11,
+                                bold=False, color_hex="333333", space_before=20,
+                                space_after=60)
+            else:
+                for alt in alternativas:
+                    add_styled_para(doc, alt, font_size=11, bold=False,
+                                    color_hex="333333", space_before=0,
+                                    space_after=20)
+                # Espaco apos alternativas
+                if alternativas:
+                    add_styled_para(doc, "", font_size=4, space_after=40)
+
+        elif t == "contexto":
+            # Slide de contexto genérico
+            texto = sl.get("texto", "")
+            if texto:
+                add_styled_para(doc, texto, font_size=11, bold=False,
+                                color_hex="333333", space_before=60, space_after=60)
+
+        elif t == "imagem":
+            # Imagem extraida do slide
+            img_b64 = sl.get("img_b64", "")
+            img_ext = sl.get("img_ext", "png")
+            if img_b64:
+                try:
+                    img_data = base64.b64decode(img_b64)
+                    img_stream = io.BytesIO(img_data)
+                    p = doc.add_paragraph()
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = p.add_run()
+                    run.add_picture(img_stream, width=Inches(5.5))
+                    pf = p.paragraph_format
+                    pf.space_before = DocxPt(40)
+                    pf.space_after = DocxPt(40)
+                except Exception:
+                    add_styled_para(doc, "[Imagem não disponível]", font_size=10,
+                                    italic=True, color_hex="999999",
+                                    alignment=WD_ALIGN_PARAGRAPH.CENTER)
+
+    # ---- Gabarito ----
+    if gabarito and gabarito.get("questoes"):
+        doc.add_page_break()
+        add_separator(doc)
+        add_styled_para(doc, "GABARITO", font_size=16, bold=True,
+                        color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                        space_before=12, space_after=12)
+        add_separator(doc)
+        add_styled_para(doc, "", font_size=6, space_after=60)
+
+        qs = gabarito.get("questoes", [])
+        rs = gabarito.get("respostas", [])
+        # Montar gabarito em linhas de 5
+        linhas_gab = []
+        for i in range(0, len(qs), 5):
+            chunk_q = qs[i:i+5]
+            chunk_r = rs[i:i+5]
+            parts = [f"{q}) {r}" for q, r in zip(chunk_q, chunk_r)]
+            linhas_gab.append("     ".join(parts))
+
+        for linha in linhas_gab:
+            add_styled_para(doc, linha, font_size=12, bold=True,
+                            color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                            space_before=0, space_after=40)
+
+    # ---- Salvar ----
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+
+    # Limpar temp
+    try: os.unlink(tmp_docx.name)
+    except: pass
+
+    return buf
+
 
 def _build_pptx(payload):
     prs = Presentation()
@@ -896,8 +1129,28 @@ def gerar():
             is_pptx = fname.endswith(".pptx")
             is_docx = fname.endswith(".docx")
 
-            # Se formato é slides_to_slides OU arquivo é .pptx → usar parser de PPTX
-            if formato == "slides_to_slides" or is_pptx:
+            # --- SLIDES → WORD ---
+            if formato == "slides_to_word":
+                if not is_pptx:
+                    return jsonify({"erro":"Para o formato Slides→Word, envie um arquivo .pptx"}), 400
+                with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
+                    arq.save(tmp.name); path = tmp.name
+                try:
+                    if usar_ia:
+                        sl, gab = _parse_pptx_via_claude(path, disc, ass)
+                    else:
+                        sl, gab = _parse_pptx(path)
+                finally: os.unlink(path)
+                payload = {"disciplina":disc,"assunto":ass,"tipo":tipo,"professor":prof,"slides":sl,"gabarito":gab}
+                buf = _gerar_docx(payload)
+                d = disc.replace(" ","_") or "apresentacao"
+                a = ass.replace(" ","_")
+                fn = "Carranza_" + d + "_" + a + ".docx" if a else "Carranza_" + d + ".docx"
+                return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                 as_attachment=True, download_name=fn)
+
+            # --- SLIDES → SLIDES ---
+            elif formato == "slides_to_slides" or is_pptx:
                 if not is_pptx:
                     return jsonify({"erro":"Para o formato Slides→Slides, envie um arquivo .pptx"}), 400
                 with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
@@ -944,6 +1197,8 @@ def gerar():
         else:
             payload = request.get_json(force=True)
             if not payload: return jsonify({"erro":"Payload vazio"}), 400
+
+        # --- Gerar saída (PPTX é o padrão para os demais formatos) ---
         buf = _build_pptx(payload)
         d = payload.get("disciplina","apresentacao").replace(" ","_")
         a = payload.get("assunto","").replace(" ","_")
