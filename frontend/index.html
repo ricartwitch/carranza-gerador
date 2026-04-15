@@ -1,9 +1,10 @@
+
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Carranza Cursos — Gerador de Slides</title>
+<title>Carranza Cursos — Gerador de Materiais</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -116,18 +117,31 @@
   <img src="https://raw.githubusercontent.com/ricartwitch/carranza-gerador/main/backend/assets/logo_carranza.png" alt="Carranza" onerror="this.style.display='none'">
   <div>
     <div class="title">Carranza Cursos</div>
-    <div class="sub">Gerador de Slides para Questões</div>
+    <div class="sub">Gerador de Materiais Formatados</div>
   </div>
 </header>
 
 <div class="container">
 
   <div class="card">
+    <h2>🔄 Formato de Conversão</h2>
+    <label>De → Para</label>
+    <select id="formato" onchange="onFormato()">
+      <option value="word_to_slides">Word → Slides Formatados</option>
+      <option value="slides_to_slides">Slides → Slides Formatados</option>
+      <option value="slides_to_word" disabled>Slides → Word (em breve)</option>
+    </select>
+    <p class="tip" id="formato-desc" style="margin-top:0; text-align:left; color:#70001C; font-weight:500;">
+      Envie um .docx ou .txt e receba slides formatados no padrão Carranza.
+    </p>
+  </div>
+
+  <div class="card">
     <h2>📁 Arquivo</h2>
     <div class="upload-zone" id="zone" onclick="document.getElementById('file').click()">
       <div class="icon">📄</div>
       <p id="zone-txt">Clique ou arraste o arquivo aqui</p>
-      <small>.docx ou .txt</small>
+      <small id="zone-ext">.docx ou .txt</small>
     </div>
     <input type="file" id="file" accept=".docx,.txt" onchange="onFile(this)">
   </div>
@@ -181,6 +195,24 @@
 const API = 'https://carranza-gerador.onrender.com';
 let usarIA = false;
 
+const FORMATO_CFG = {
+  word_to_slides:  { accept: '.docx,.txt', ext: '.docx ou .txt', desc: 'Envie um .docx ou .txt e receba slides formatados no padrão Carranza.' },
+  slides_to_slides: { accept: '.pptx', ext: '.pptx', desc: 'Envie um .pptx não formatado e receba slides reformatados no padrão Carranza.' },
+  slides_to_word:  { accept: '.pptx', ext: '.pptx', desc: 'Envie um .pptx e receba um documento Word formatado. (Em breve)' },
+};
+
+function onFormato() {
+  const fmt = document.getElementById('formato').value;
+  const cfg = FORMATO_CFG[fmt];
+  document.getElementById('file').accept = cfg.accept;
+  document.getElementById('zone-ext').textContent = cfg.ext;
+  document.getElementById('formato-desc').textContent = cfg.desc;
+  // Reset file selection when format changes
+  document.getElementById('file').value = '';
+  document.getElementById('zone').classList.remove('has-file');
+  document.getElementById('zone-txt').textContent = 'Clique ou arraste o arquivo aqui';
+}
+
 function toggleIA() {
   usarIA = !usarIA;
   document.getElementById('ia-box').classList.toggle('active', usarIA);
@@ -210,7 +242,8 @@ function showMsg(txt, ok) {
 
 async function gerar() {
   const file = document.getElementById('file').files[0];
-  if (!file) { showMsg('Por favor selecione um arquivo .docx ou .txt', false); return; }
+  const formato = document.getElementById('formato').value;
+  if (!file) { showMsg('Por favor selecione um arquivo', false); return; }
 
   const btn = document.getElementById('btn');
   btn.disabled = true; btn.classList.add('loading');
@@ -223,6 +256,7 @@ async function gerar() {
     fd.append('assunto', document.getElementById('assunto').value || '');
     fd.append('professor', document.getElementById('professor').value || '');
     fd.append('tipo', document.getElementById('tipo').value);
+    fd.append('formato', formato);
     fd.append('usar_ia', usarIA ? '1' : '0');
 
     const resp = await fetch(API + '/gerar', { method: 'POST', body: fd });
