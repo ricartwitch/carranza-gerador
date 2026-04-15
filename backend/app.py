@@ -594,6 +594,134 @@ def _parse_texto(texto):
     gab = {"questoes": gqs, "respostas": grs} if gqs else None
     return slides, gab
 
+def _parse_pptx(filepath):
+    """Extrai texto e imagens de um PPTX não formatado para gerar slides formatados."""
+    prs_in = Presentation(filepath)
+    # Coleta todo o texto bruto, slide a slide
+    all_text = []
+    img_slides = []  # (slide_index, img_bytes_b64, img_ext)
+
+    for si, slide in enumerate(prs_in.slides):
+        slide_texts = []
+        for shape in slide.shapes:
+            # Extrair imagens
+            if shape.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE
+                try:
+                    img_blob = shape.image.blob
+                    content_type = shape.image.content_type or "image/png"
+                    ext = content_type.split("/")[-1].replace("jpeg", "jpg")
+                    if ext not in ("png", "jpg", "gif", "bmp", "webp"):
+                        ext = "png"
+                    img_b64 = base64.b64encode(img_blob).decode()
+                    img_slides.append((si, img_b64, ext))
+                except Exception:
+                    pass
+            # Extrair texto de textboxes e tabelas
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    txt = para.text.strip()
+                    if txt:
+                        slide_texts.append(txt)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    row_texts = []
+                    for cell in row.cells:
+                        ct = cell.text.strip()
+                        if ct:
+                            row_texts.append(ct)
+                    if row_texts:
+                        slide_texts.append(" | ".join(row_texts))
+        if slide_texts:
+            all_text.append((si, slide_texts))
+
+    # Juntar todo o texto extraído em um bloco único
+    linhas = []
+    for si, texts in all_text:
+        for t in texts:
+            linhas.append(t)
+        linhas.append("")  # separador entre slides
+
+    texto_bruto = "\n".join(linhas)
+
+    # Usar o mesmo parser de texto para extrair questões
+    slides_parsed, gab = _parse_texto(texto_bruto)
+
+    # Se o parser de texto não encontrou questões suficientes, inserir imagens como slides
+    # Mapear imagens: inserir cada imagem como slide de imagem
+    img_queue = list(img_slides)
+
+    # Se não conseguiu parsear nenhuma questão via texto, tenta cada slide como contexto/imagem
+    if not slides_parsed:
+        for si, texts in all_text:
+            txt_combined = " ".join(texts)
+            if txt_combined.strip():
+                slides_parsed.append({"tipo": "contexto", "texto": txt_combined})
+        for si, img_b64, img_ext in img_queue:
+            slides_parsed.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
+    else:
+        # Adicionar imagens que não foram capturadas pelo parser de texto
+        for si, img_b64, img_ext in img_queue:
+            slides_parsed.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
+
+    return slides_parsed, gab
+
+def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
+    """Extrai texto de PPTX e usa Claude para interpretar questões."""
+    prs_in = Presentation(filepath)
+    linhas = []
+    img_slides = []
+
+    for si, slide in enumerate(prs_in.slides):
+        slide_texts = []
+        for shape in slide.shapes:
+            if shape.shape_type == 13:
+                try:
+                    img_blob = shape.image.blob
+                    content_type = shape.image.content_type or "image/png"
+                    ext = content_type.split("/")[-1].replace("jpeg", "jpg")
+                    if ext not in ("png", "jpg", "gif", "bmp", "webp"):
+                        ext = "png"
+                    img_b64 = base64.b64encode(img_blob).decode()
+                    img_slides.append((si, img_b64, ext))
+                except Exception:
+                    pass
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    txt = para.text.strip()
+                    if txt:
+                        slide_texts.append(txt)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        ct = cell.text.strip()
+                        if ct:
+                            slide_texts.append(ct)
+        for t in slide_texts:
+            linhas.append(t)
+        linhas.append("")
+
+    texto_bruto = "\n".join(linhas)
+    resultado = _parse_via_claude(texto_bruto, disciplina, assunto)
+
+    sl = []
+    for q in resultado.get("questoes", []):
+        sl.append({
+            "tipo": "questao",
+            "numero": q.get("numero", 0),
+            "enunciado": q.get("enunciado", ""),
+            "certo_errado": q.get("certo_errado", False),
+            "alternativas": q.get("alternativas", [])
+        })
+
+    # Adicionar imagens extraídas
+    for si, img_b64, img_ext in img_slides:
+        sl.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
+
+    gab_raw = resultado.get("gabarito", {})
+    gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
+    return sl, gab
+
+
 app = Flask(__name__)
 CORS(app, origins="*")
 
@@ -610,14 +738,30 @@ def gerar():
             ass  = request.form.get("assunto","ASSUNTO")
             prof = request.form.get("professor","")
             tipo = request.form.get("tipo","QUESTOES")
+            formato = request.form.get("formato","word_to_slides")
             usar_ia = request.form.get("usar_ia","0") == "1"
             if not arq: return jsonify({"erro":"Arquivo nao enviado"}), 400
-            if arq.filename.lower().endswith(".docx"):
+            fname = arq.filename.lower()
+
+            if formato == "slides_to_slides":
+                # --- SLIDES → SLIDES FORMATADOS ---
+                if not fname.endswith(".pptx"):
+                    return jsonify({"erro":"Para o formato Slides→Slides, envie um arquivo .pptx"}), 400
+                with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
+                    arq.save(tmp.name); path = tmp.name
+                try:
+                    if usar_ia:
+                        sl, gab = _parse_pptx_via_claude(path, disc, ass)
+                    else:
+                        sl, gab = _parse_pptx(path)
+                finally: os.unlink(path)
+
+            elif fname.endswith(".docx"):
+                # --- WORD → SLIDES (fluxo original) ---
                 with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
                     arq.save(tmp.name); path = tmp.name
                 try:
                     if usar_ia:
-                        # Modo IA: extrai texto e envia para Claude
                         texto_bruto = _extrair_texto_docx(path)
                         resultado = _parse_via_claude(texto_bruto, disc, ass)
                         sl = []
@@ -635,8 +779,10 @@ def gerar():
                         sl, gab = _parse_docx(path)
                 finally: os.unlink(path)
             else:
+                # --- TXT → SLIDES (fluxo original) ---
                 texto = arq.read().decode("utf-8", errors="ignore")
                 sl, gab = _parse_texto(texto)
+
             payload = {"disciplina":disc,"assunto":ass,"tipo":tipo,"professor":prof,"slides":sl,"gabarito":gab}
         else:
             payload = request.get_json(force=True)
