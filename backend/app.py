@@ -144,6 +144,49 @@ def _slide_gabarito(prs, qs, rs):
             ru.font.bold = True; ru.font.size = Pt(18); ru.font.color.rgb = PRETO
     _faixa_rodape(s)
 
+def _slide_secao(prs, titulo):
+    """Slide divisor de seção — fundo da capa com texto centralizado."""
+    s = prs.slides.add_slide(_blank(prs))
+    _pic(s,"capa_background",0,0,SLIDE_W,SLIDE_H)
+    _pic(s,"logo_carranza",LOGO_CAPA_X,LOGO_CAPA_Y,LOGO_CAPA_CX,LOGO_CAPA_CY)
+    tb = s.shapes.add_textbox(Emu(CAPA_X),Emu(CAPA_Y),Emu(CAPA_CX),Emu(CAPA_CY))
+    tf = tb.text_frame; tf.word_wrap = True
+    p = tf.paragraphs[0]; p.alignment = PP_ALIGN.CENTER
+    _run(p, titulo.upper(), bold=True, sz=635000, color=VINHO)
+
+def _slide_conteudo_titulado(prs, titulo, paragrafos, citacao=None):
+    """Slide de conteúdo com título em destaque + parágrafos abaixo."""
+    s = prs.slides.add_slide(_blank(prs))
+    _pic(s,"logo_carranza",LOGO_MASTER_X,LOGO_MASTER_Y,LOGO_MASTER_CX,LOGO_MASTER_CY)
+    # Título no topo
+    TITULO_Y = 420000
+    TITULO_H = 500000
+    tb_titulo = s.shapes.add_textbox(Emu(TEXTO_X), Emu(TITULO_Y), Emu(TEXTO_CX), Emu(TITULO_H))
+    tf_t = tb_titulo.text_frame; tf_t.word_wrap = True
+    pt = tf_t.paragraphs[0]; pt.alignment = PP_ALIGN.LEFT
+    _run(pt, titulo.upper() if titulo else "", bold=True, sz=508000, color=VINHO)
+    # Conteúdo abaixo do título
+    CONTEUDO_Y = TITULO_Y + TITULO_H + 80000
+    CONTEUDO_H = RODAPE_Y - CONTEUDO_Y - int(20 * 12700)
+    tb = s.shapes.add_textbox(Emu(TEXTO_X), Emu(CONTEUDO_Y), Emu(TEXTO_CX), Emu(CONTEUDO_H))
+    tf = tb.text_frame; tf.word_wrap = True
+    # Calcular tamanho da fonte baseado no volume de texto
+    total_chars = sum(len(p) for p in paragrafos)
+    if total_chars > 800: sz = 381000
+    elif total_chars > 500: sz = 406400
+    elif total_chars > 300: sz = 444500
+    else: sz = 482600
+    first = True
+    for texto in paragrafos:
+        para = tf.paragraphs[0] if first else tf.add_paragraph()
+        first = False; para.alignment = PP_ALIGN.JUSTIFY
+        _run(para, texto, bold=False, sz=sz, color=PRETO)
+    if citacao:
+        tb2 = s.shapes.add_textbox(Emu(RODAPE_X),Emu(RODAPE_Y),Emu(RODAPE_CX),Emu(RODAPE_CY))
+        p2 = tb2.text_frame.paragraphs[0]; p2.alignment = PP_ALIGN.RIGHT
+        _run(p2, citacao, bold=True, sz=254000, color=VINHO)
+    _faixa_rodape(s)
+
 def _slide_enc(prs):
     s = prs.slides.add_slide(_blank(prs))
     _pic(s,"capa_background",0,0,SLIDE_W,SLIDE_H)
@@ -184,6 +227,12 @@ def _build_pptx(payload):
         tipo = s.get("tipo")
         if tipo == "contexto":
             _slide_conteudo(prs, [{"text": s.get("texto",""), "bold": True, "sz": 508000}])
+            continue
+        if tipo == "secao":
+            _slide_secao(prs, s.get("titulo",""))
+            continue
+        if tipo == "conteudo_slide":
+            _slide_conteudo_titulado(prs, s.get("titulo",""), s.get("paragrafos",[]), citacao=next(cit))
             continue
         if tipo == "imagem":
             img_b64 = s.get("img_b64",""); img_ext = s.get("img_ext","png")
@@ -595,75 +644,86 @@ def _parse_texto(texto):
     return slides, gab
 
 def _parse_pptx(filepath):
-    """Extrai texto e imagens de um PPTX não formatado para gerar slides formatados."""
+    """Extrai texto e imagens de um PPTX não formatado, preservando estrutura slide a slide."""
     prs_in = Presentation(filepath)
-    # Coleta todo o texto bruto, slide a slide
-    all_text = []
-    img_slides = []  # (slide_index, img_bytes_b64, img_ext)
+    slides_parsed = []
+    all_text_lines = []  # para tentativa de parse de questões
 
-    for si, slide in enumerate(prs_in.slides):
-        slide_texts = []
+    # --- Passo 1: extrair estrutura de cada slide ---
+    extracted = []  # lista de dicts: {titulo, subtitulo, conteudos, imagens}
+    for slide in prs_in.slides:
+        info = {"titulo": "", "subtitulo": "", "conteudos": [], "imagens": []}
         for shape in slide.shapes:
-            # Extrair imagens
-            if shape.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE
+            # Imagens
+            if shape.shape_type == 13:
                 try:
-                    img_blob = shape.image.blob
-                    content_type = shape.image.content_type or "image/png"
-                    ext = content_type.split("/")[-1].replace("jpeg", "jpg")
-                    if ext not in ("png", "jpg", "gif", "bmp", "webp"):
-                        ext = "png"
-                    img_b64 = base64.b64encode(img_blob).decode()
-                    img_slides.append((si, img_b64, ext))
+                    blob = shape.image.blob
+                    ct = shape.image.content_type or "image/png"
+                    ext = ct.split("/")[-1].replace("jpeg","jpg")
+                    if ext not in ("png","jpg","gif","bmp","webp"): ext = "png"
+                    info["imagens"].append((base64.b64encode(blob).decode(), ext))
                 except Exception:
                     pass
-            # Extrair texto de textboxes e tabelas
+            # Texto
             if shape.has_text_frame:
-                for para in shape.text_frame.paragraphs:
-                    txt = para.text.strip()
-                    if txt:
-                        slide_texts.append(txt)
+                name = shape.name.lower()
+                texts = [p.text.strip() for p in shape.text_frame.paragraphs if p.text.strip()]
+                if 'título' in name or 'title' in name:
+                    info["titulo"] = " ".join(texts)
+                elif 'subtítulo' in name or 'subtitle' in name:
+                    info["subtitulo"] = " ".join(texts)
+                else:
+                    info["conteudos"].extend(texts)
+            # Tabelas
             if shape.has_table:
                 for row in shape.table.rows:
-                    row_texts = []
-                    for cell in row.cells:
-                        ct = cell.text.strip()
-                        if ct:
-                            row_texts.append(ct)
-                    if row_texts:
-                        slide_texts.append(" | ".join(row_texts))
-        if slide_texts:
-            all_text.append((si, slide_texts))
+                    row_t = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if row_t:
+                        info["conteudos"].append(" | ".join(row_t))
+        extracted.append(info)
+        # Acumular texto para tentativa de parse de questões
+        if info["titulo"]: all_text_lines.append(info["titulo"])
+        for c in info["conteudos"]: all_text_lines.append(c)
+        all_text_lines.append("")
 
-    # Juntar todo o texto extraído em um bloco único
-    linhas = []
-    for si, texts in all_text:
-        for t in texts:
-            linhas.append(t)
-        linhas.append("")  # separador entre slides
+    # --- Passo 2: tentar detectar se é material de questões ---
+    texto_bruto = "\n".join(all_text_lines)
+    questoes_parsed, gab = _parse_texto(texto_bruto)
+    tem_questoes = any(s.get("tipo") == "questao" for s in questoes_parsed)
 
-    texto_bruto = "\n".join(linhas)
+    if tem_questoes:
+        # É material de questões — usar parse de questões + imagens soltas
+        for info in extracted:
+            for img_b64, img_ext in info["imagens"]:
+                questoes_parsed.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
+        return questoes_parsed, gab
 
-    # Usar o mesmo parser de texto para extrair questões
-    slides_parsed, gab = _parse_texto(texto_bruto)
+    # --- Passo 3: não é questões — preservar estrutura slide a slide ---
+    for info in extracted:
+        titulo = info["titulo"]
+        subtitulo = info["subtitulo"]
+        conteudos = info["conteudos"]
+        imagens = info["imagens"]
+        is_divider = not conteudos and not imagens and (titulo or subtitulo)
 
-    # Se o parser de texto não encontrou questões suficientes, inserir imagens como slides
-    # Mapear imagens: inserir cada imagem como slide de imagem
-    img_queue = list(img_slides)
+        if is_divider:
+            # Slide divisor de seção
+            label = titulo
+            if subtitulo:
+                label = (label + " — " + subtitulo) if label else subtitulo
+            slides_parsed.append({"tipo": "secao", "titulo": label})
+        else:
+            # Slide de conteúdo com título
+            slides_parsed.append({
+                "tipo": "conteudo_slide",
+                "titulo": titulo,
+                "paragrafos": conteudos
+            })
+            # Imagens do slide
+            for img_b64, img_ext in imagens:
+                slides_parsed.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
 
-    # Se não conseguiu parsear nenhuma questão via texto, tenta cada slide como contexto/imagem
-    if not slides_parsed:
-        for si, texts in all_text:
-            txt_combined = " ".join(texts)
-            if txt_combined.strip():
-                slides_parsed.append({"tipo": "contexto", "texto": txt_combined})
-        for si, img_b64, img_ext in img_queue:
-            slides_parsed.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
-    else:
-        # Adicionar imagens que não foram capturadas pelo parser de texto
-        for si, img_b64, img_ext in img_queue:
-            slides_parsed.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
-
-    return slides_parsed, gab
+    return slides_parsed, None
 
 def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
     """Extrai texto de PPTX e usa Claude para interpretar questões."""
@@ -671,33 +731,26 @@ def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
     linhas = []
     img_slides = []
 
-    for si, slide in enumerate(prs_in.slides):
-        slide_texts = []
+    for slide in prs_in.slides:
         for shape in slide.shapes:
             if shape.shape_type == 13:
                 try:
-                    img_blob = shape.image.blob
-                    content_type = shape.image.content_type or "image/png"
-                    ext = content_type.split("/")[-1].replace("jpeg", "jpg")
-                    if ext not in ("png", "jpg", "gif", "bmp", "webp"):
-                        ext = "png"
-                    img_b64 = base64.b64encode(img_blob).decode()
-                    img_slides.append((si, img_b64, ext))
+                    blob = shape.image.blob
+                    ct = shape.image.content_type or "image/png"
+                    ext = ct.split("/")[-1].replace("jpeg","jpg")
+                    if ext not in ("png","jpg","gif","bmp","webp"): ext = "png"
+                    img_slides.append((base64.b64encode(blob).decode(), ext))
                 except Exception:
                     pass
             if shape.has_text_frame:
                 for para in shape.text_frame.paragraphs:
                     txt = para.text.strip()
-                    if txt:
-                        slide_texts.append(txt)
+                    if txt: linhas.append(txt)
             if shape.has_table:
                 for row in shape.table.rows:
                     for cell in row.cells:
                         ct = cell.text.strip()
-                        if ct:
-                            slide_texts.append(ct)
-        for t in slide_texts:
-            linhas.append(t)
+                        if ct: linhas.append(ct)
         linhas.append("")
 
     texto_bruto = "\n".join(linhas)
@@ -712,9 +765,7 @@ def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
             "certo_errado": q.get("certo_errado", False),
             "alternativas": q.get("alternativas", [])
         })
-
-    # Adicionar imagens extraídas
-    for si, img_b64, img_ext in img_slides:
+    for img_b64, img_ext in img_slides:
         sl.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
 
     gab_raw = resultado.get("gabarito", {})
