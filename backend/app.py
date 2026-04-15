@@ -289,7 +289,6 @@ def _extrair_texto_docx(filepath):
 
 def _parse_via_claude(texto_bruto, disciplina="", assunto=""):
     """Usa Claude API para extrair questões de qualquer formato de texto."""
-    import urllib.request, json as jsonlib
     prompt = f"""Você é um extrator de questões de concurso. Analise o texto abaixo e extraia TODAS as questões.
 
 Retorne APENAS um JSON válido, sem texto antes ou depois, sem marcações markdown, com esta estrutura exata:
@@ -318,28 +317,7 @@ Regras:
 TEXTO:
 {texto_bruto[:8000]}
 """
-    payload = jsonlib.dumps({
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 4000,
-        "messages": [{"role": "user", "content": prompt}]
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01",
-            "x-api-key": os.environ.get("ANTHROPIC_API_KEY", "")
-        },
-        method="POST"
-    )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = jsonlib.loads(resp.read())
-    txt = data["content"][0]["text"].strip()
-    # Limpar markdown se houver
-    if txt.startswith("```"): txt = "\n".join(txt.split("\n")[1:])
-    if txt.endswith("```"): txt = "\n".join(txt.split("\n")[:-1])
-    return jsonlib.loads(txt.strip())
+    return _chamar_claude_api(prompt, max_tokens=4000, timeout=60)
 
 def _parse_docx(filepath):
     from docx import Document
@@ -725,13 +703,16 @@ def _parse_pptx(filepath):
 
     return slides_parsed, None
 
-def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
-    """Extrai texto de PPTX e usa Claude para interpretar questões."""
+def _extrair_conteudo_pptx(filepath):
+    """Extrai texto estruturado (slide a slide) e imagens de um PPTX."""
     prs_in = Presentation(filepath)
-    linhas = []
-    img_slides = []
+    slides_info = []
+    img_list = []  # (slide_index, b64, ext)
 
-    for slide in prs_in.slides:
+    for si, slide in enumerate(prs_in.slides):
+        titulo = ""
+        subtitulo = ""
+        conteudos = []
         for shape in slide.shapes:
             if shape.shape_type == 13:
                 try:
@@ -739,38 +720,155 @@ def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
                     ct = shape.image.content_type or "image/png"
                     ext = ct.split("/")[-1].replace("jpeg","jpg")
                     if ext not in ("png","jpg","gif","bmp","webp"): ext = "png"
-                    img_slides.append((base64.b64encode(blob).decode(), ext))
+                    img_list.append((si, base64.b64encode(blob).decode(), ext))
                 except Exception:
                     pass
             if shape.has_text_frame:
-                for para in shape.text_frame.paragraphs:
-                    txt = para.text.strip()
-                    if txt: linhas.append(txt)
+                name = shape.name.lower()
+                texts = [p.text.strip() for p in shape.text_frame.paragraphs if p.text.strip()]
+                if 'título' in name or 'title' in name:
+                    titulo = " ".join(texts)
+                elif 'subtítulo' in name or 'subtitle' in name:
+                    subtitulo = " ".join(texts)
+                else:
+                    conteudos.extend(texts)
             if shape.has_table:
                 for row in shape.table.rows:
-                    for cell in row.cells:
-                        ct = cell.text.strip()
-                        if ct: linhas.append(ct)
-        linhas.append("")
+                    row_t = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if row_t: conteudos.append(" | ".join(row_t))
+        slides_info.append({"index": si, "titulo": titulo, "subtitulo": subtitulo, "conteudos": conteudos})
 
-    texto_bruto = "\n".join(linhas)
-    resultado = _parse_via_claude(texto_bruto, disciplina, assunto)
+    # Montar texto estruturado para enviar à IA
+    texto_estruturado = ""
+    for s in slides_info:
+        texto_estruturado += f"\n--- SLIDE {s['index']+1} ---\n"
+        if s["titulo"]: texto_estruturado += f"TÍTULO: {s['titulo']}\n"
+        if s["subtitulo"]: texto_estruturado += f"SUBTÍTULO: {s['subtitulo']}\n"
+        for c in s["conteudos"]:
+            texto_estruturado += f"{c}\n"
 
-    sl = []
-    for q in resultado.get("questoes", []):
-        sl.append({
-            "tipo": "questao",
-            "numero": q.get("numero", 0),
-            "enunciado": q.get("enunciado", ""),
-            "certo_errado": q.get("certo_errado", False),
-            "alternativas": q.get("alternativas", [])
-        })
-    for img_b64, img_ext in img_slides:
-        sl.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
+    return texto_estruturado, img_list
 
-    gab_raw = resultado.get("gabarito", {})
-    gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
-    return sl, gab
+_CLAUDE_PROMPT_SLIDES = """Você é um especialista em formatação de materiais educativos para concursos públicos.
+
+Analise o conteúdo extraído de uma apresentação PowerPoint abaixo. Este material pode conter:
+- Slides de TEORIA (artigos de lei, jurisprudência, doutrina, explicações)
+- Slides de QUESTÕES (enunciados com alternativas A-E ou Certo/Errado)
+- Slides DIVISORES de seção (apenas título e subtítulo, sem conteúdo)
+- Qualquer combinação dos anteriores
+
+Sua tarefa é classificar e estruturar CADA slide corretamente.
+
+Retorne APENAS um JSON válido, sem texto antes ou depois, sem marcações markdown, com esta estrutura:
+{
+  "slides": [
+    {
+      "tipo": "secao",
+      "titulo": "Texto do título da seção"
+    },
+    {
+      "tipo": "conteudo_slide",
+      "titulo": "Título do slide",
+      "paragrafos": ["parágrafo 1", "parágrafo 2"]
+    },
+    {
+      "tipo": "questao",
+      "numero": 1,
+      "enunciado": "texto completo do enunciado incluindo textos de apoio",
+      "alternativas": ["A) texto", "B) texto", "C) texto", "D) texto", "E) texto"],
+      "certo_errado": false
+    }
+  ],
+  "gabarito": {
+    "questoes": [1, 2],
+    "respostas": ["A", "B"]
+  }
+}
+
+REGRAS IMPORTANTES:
+1. Slides que têm APENAS título (e talvez subtítulo) sem conteúdo são "secao". Combine título e subtítulo: "Título — Subtítulo"
+2. Slides com título + parágrafos de teoria/lei/jurisprudência são "conteudo_slide". Mantenha CADA parágrafo separado no array.
+3. Slides com questões numeradas + alternativas são "questao". Alternativas no formato "A) texto".
+4. Se a questão for Certo/Errado (sem alternativas A-E), coloque certo_errado=true e alternativas=[]
+5. PRESERVE o conteúdo completo de cada parágrafo, sem resumir nem cortar.
+6. Se não houver gabarito, retorne gabarito com listas vazias.
+7. Mantenha a ORDEM original dos slides.
+"""
+
+def _chamar_claude_api(prompt_text, max_tokens=8000, timeout=90):
+    """Chamada genérica à Claude API. Retorna o texto da resposta."""
+    import urllib.request, json as jsonlib
+    payload = jsonlib.dumps({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt_text}]
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": os.environ.get("ANTHROPIC_API_KEY", "")
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = jsonlib.loads(resp.read())
+    txt = data["content"][0]["text"].strip()
+    if txt.startswith("```"): txt = "\n".join(txt.split("\n")[1:])
+    if txt.endswith("```"): txt = "\n".join(txt.split("\n")[:-1])
+    return jsonlib.loads(txt.strip())
+
+def _dividir_texto_em_blocos(texto_estruturado, max_chars=10000):
+    """Divide texto estruturado em blocos respeitando limites de slide."""
+    partes = texto_estruturado.split("\n--- SLIDE ")
+    blocos = []
+    bloco_atual = ""
+    for i, parte in enumerate(partes):
+        pedaco = ("--- SLIDE " + parte) if i > 0 else parte
+        if len(bloco_atual) + len(pedaco) > max_chars and bloco_atual:
+            blocos.append(bloco_atual)
+            bloco_atual = pedaco
+        else:
+            bloco_atual += ("\n" if bloco_atual else "") + pedaco
+    if bloco_atual:
+        blocos.append(bloco_atual)
+    return blocos
+
+def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
+    """Usa Claude API para analisar PPTX e estruturar conteúdo inteligentemente."""
+    import json as jsonlib
+
+    texto_estruturado, img_list = _extrair_conteudo_pptx(filepath)
+
+    # Dividir em blocos se necessário
+    blocos = _dividir_texto_em_blocos(texto_estruturado, max_chars=10000)
+
+    all_slides = []
+    all_gab_q = []
+    all_gab_r = []
+
+    for bi, bloco in enumerate(blocos):
+        sufixo = ""
+        if len(blocos) > 1:
+            sufixo = f"\n\n(Este é o bloco {bi+1} de {len(blocos)}. Processe apenas os slides deste bloco.)"
+
+        prompt = _CLAUDE_PROMPT_SLIDES + f"\nCONTEÚDO DA APRESENTAÇÃO:{sufixo}\n{bloco}"
+        resultado = _chamar_claude_api(prompt, max_tokens=8000, timeout=90)
+
+        all_slides.extend(resultado.get("slides", []))
+        gab = resultado.get("gabarito", {})
+        if gab and gab.get("questoes"):
+            all_gab_q.extend(gab["questoes"])
+            all_gab_r.extend(gab["respostas"])
+
+    # Adicionar imagens extraídas
+    for si, img_b64, img_ext in img_list:
+        all_slides.append({"tipo": "imagem", "img_b64": img_b64, "img_ext": img_ext})
+
+    gab_final = {"questoes": all_gab_q, "respostas": all_gab_r} if all_gab_q else None
+    return all_slides, gab_final
 
 
 app = Flask(__name__)
@@ -794,9 +892,13 @@ def gerar():
             if not arq: return jsonify({"erro":"Arquivo nao enviado"}), 400
             fname = arq.filename.lower()
 
-            if formato == "slides_to_slides":
-                # --- SLIDES → SLIDES FORMATADOS ---
-                if not fname.endswith(".pptx"):
+            # Auto-detectar formato pela extensão se necessário
+            is_pptx = fname.endswith(".pptx")
+            is_docx = fname.endswith(".docx")
+
+            # Se formato é slides_to_slides OU arquivo é .pptx → usar parser de PPTX
+            if formato == "slides_to_slides" or is_pptx:
+                if not is_pptx:
                     return jsonify({"erro":"Para o formato Slides→Slides, envie um arquivo .pptx"}), 400
                 with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
                     arq.save(tmp.name); path = tmp.name
@@ -807,7 +909,7 @@ def gerar():
                         sl, gab = _parse_pptx(path)
                 finally: os.unlink(path)
 
-            elif fname.endswith(".docx"):
+            elif is_docx:
                 # --- WORD → SLIDES (fluxo original) ---
                 with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
                     arq.save(tmp.name); path = tmp.name
@@ -815,15 +917,19 @@ def gerar():
                     if usar_ia:
                         texto_bruto = _extrair_texto_docx(path)
                         resultado = _parse_via_claude(texto_bruto, disc, ass)
-                        sl = []
-                        for q in resultado.get("questoes", []):
-                            sl.append({
-                                "tipo": "questao",
-                                "numero": q.get("numero", 0),
-                                "enunciado": q.get("enunciado", ""),
-                                "certo_errado": q.get("certo_errado", False),
-                                "alternativas": q.get("alternativas", [])
-                            })
+                        # Suporta tanto formato antigo (questoes) quanto novo (slides)
+                        if "slides" in resultado:
+                            sl = resultado["slides"]
+                        else:
+                            sl = []
+                            for q in resultado.get("questoes", []):
+                                sl.append({
+                                    "tipo": "questao",
+                                    "numero": q.get("numero", 0),
+                                    "enunciado": q.get("enunciado", ""),
+                                    "certo_errado": q.get("certo_errado", False),
+                                    "alternativas": q.get("alternativas", [])
+                                })
                         gab_raw = resultado.get("gabarito", {})
                         gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
                     else:
