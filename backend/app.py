@@ -37,6 +37,11 @@ MODELO_DOCX = os.path.join(os.path.dirname(__file__), "assets", "MODELO_DOCUMENT
 WS_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 NS_R  = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
 NS_A  = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
+VML_NS = '{urn:schemas-microsoft-com:vml}'
+
+def _has_img_xml(xml):
+    """Detecta qualquer tipo de imagem (DrawingML moderno ou VML legado)."""
+    return ('<w:drawing' in xml) or ('<w:pict' in xml) or ('<v:imagedata' in xml)
 
 def _img_asset(k):
     p = {"capa_background": "capa_background.png",
@@ -110,8 +115,9 @@ def _slide_conteudo(prs, paragrafos, citacao=None):
 def _slide_imagem(prs, img_bytes_b64, img_ext="png"):
     s = prs.slides.add_slide(_blank(prs))
     _pic(s,"logo_carranza",LOGO_MASTER_X,LOGO_MASTER_Y,LOGO_MASTER_CX,LOGO_MASTER_CY)
+    # Area util abaixo da logo master (evita sobreposicao)
     margin_x = TEXTO_X
-    margin_y = TEXTO_Y
+    margin_y = LOGO_MASTER_Y + LOGO_MASTER_CY + 120000
     max_w = SLIDE_W - 2 * margin_x
     max_h = RODAPE_Y - margin_y - int(20 * 12700)
     img_bytes = base64.b64decode(img_bytes_b64)
@@ -119,11 +125,21 @@ def _slide_imagem(prs, img_bytes_b64, img_ext="png"):
         from PIL import Image as PILImage
         pil = PILImage.open(io.BytesIO(img_bytes))
         orig_w, orig_h = pil.size
-        scale = min(max_w / (orig_w * 9144), max_h / (orig_h * 9144), 1.0)
-        w_emu = int(orig_w * 9144 * scale)
-        h_emu = int(orig_h * 9144 * scale)
+        # Usa DPI real da imagem (fallback 96 se ausente)
+        dpi_info = pil.info.get('dpi', (96, 96))
+        dpi_x = dpi_info[0] if dpi_info and dpi_info[0] else 96
+        dpi_y = dpi_info[1] if dpi_info and len(dpi_info) > 1 and dpi_info[1] else dpi_x
+        emu_per_px_x = 914400.0 / dpi_x
+        emu_per_px_y = 914400.0 / dpi_y
+        w_nat = orig_w * emu_per_px_x
+        h_nat = orig_h * emu_per_px_y
+        scale = min(max_w / w_nat, max_h / h_nat, 1.0)
+        w_emu = int(w_nat * scale)
+        h_emu = int(h_nat * scale)
     except Exception:
-        w_emu = int(max_w * 0.8); h_emu = int(max_h * 0.8)
+        # Fallback: usa proporcao 4:3 ocupando o maximo sem distorcer
+        w_emu = int(max_w * 0.9)
+        h_emu = int(min(max_h * 0.9, w_emu * 3 / 4))
     left = (SLIDE_W - w_emu) // 2
     top = margin_y + (max_h - h_emu) // 2
     buf = io.BytesIO(img_bytes); buf.seek(0)
@@ -605,32 +621,125 @@ def _build_pptx(payload):
     buf = io.BytesIO(); prs.save(buf); buf.seek(0)
     return buf
 
-def _get_img_from_para(para, doc_part):
-    if '<w:drawing' not in para._element.xml: return None
-    blip = para._element.find('.//' + NS_A + 'blip')
-    if blip is None: return None
-    rId = blip.get(NS_R + 'embed')
-    if rId is None: return None
+def _rel_to_img(doc_part, rId):
+    """Converte um relId em (b64, ext) ou None."""
+    if not rId: return None
     try:
         rel = doc_part.rels.get(rId)
         if rel is None: return None
         ext = rel.target_ref.split('.')[-1].lower()
         if ext not in ('png','jpg','jpeg','gif','bmp','webp'): ext = 'png'
         return base64.b64encode(rel.target_part.blob).decode(), ext
-    except Exception: return None
+    except Exception:
+        return None
+
+def _get_imgs_from_para(para, doc_part):
+    """Extrai TODAS as imagens de um parágrafo (DrawingML + VML legado).
+
+    Retorna lista de tuplas (b64, ext). Lista vazia se não houver imagens.
+    """
+    out = []
+    xml = para._element.xml
+    if not _has_img_xml(xml):
+        return out
+    seen = set()
+    # DrawingML moderno (<w:drawing> ... <a:blip r:embed="rIdX"/>)
+    for blip in para._element.findall('.//' + NS_A + 'blip'):
+        rId = blip.get(NS_R + 'embed') or blip.get(NS_R + 'link')
+        if not rId or rId in seen: continue
+        seen.add(rId)
+        ir = _rel_to_img(doc_part, rId)
+        if ir: out.append(ir)
+    # VML legado (<w:pict> ... <v:imagedata r:id="rIdX"/>)
+    for imgdata in para._element.findall('.//' + VML_NS + 'imagedata'):
+        rId = imgdata.get(NS_R + 'id') or imgdata.get(NS_R + 'embed')
+        if not rId or rId in seen: continue
+        seen.add(rId)
+        ir = _rel_to_img(doc_part, rId)
+        if ir: out.append(ir)
+    return out
+
+def _get_img_from_para(para, doc_part):
+    """Wrapper de compatibilidade: retorna a primeira imagem ou None."""
+    imgs = _get_imgs_from_para(para, doc_part)
+    return imgs[0] if imgs else None
 
 def _extrair_texto_docx(filepath):
-    """Extrai texto bruto do docx para enviar ao Claude."""
+    """Extrai texto bruto do docx para enviar ao Claude (compat)."""
+    texto, _ = _extrair_texto_e_imgs_docx(filepath)
+    return texto
+
+def _extrair_texto_e_imgs_docx(filepath):
+    """Extrai texto bruto + imagens do docx.
+
+    Para cada imagem, guarda o numero da ultima questao detectada antes dela
+    (padrao 'N. ...' no inicio da linha). Tambem percorre celulas de tabelas.
+    Retorna (texto, imgs) onde imgs = [{"qnum_antes": int, "b64": str, "ext": str}]
+    """
     from docx import Document
     doc = Document(filepath)
+    doc_part = doc.part
     linhas = []
-    for para in doc.paragraphs:
+    imgs = []
+    RE_NUM_HEAD = re.compile(r'^(\d{1,2})[.\-)]\s+')
+    ultimo_qnum = 0
+
+    def _processar_para(para):
+        nonlocal ultimo_qnum
         txt = para.text.strip()
+        m = RE_NUM_HEAD.match(txt) if txt else None
+        if m:
+            try: ultimo_qnum = int(m.group(1))
+            except Exception: pass
         if txt:
             linhas.append(txt)
         else:
             linhas.append("")
-    return "\n".join(linhas)
+        for b64, ext in _get_imgs_from_para(para, doc_part):
+            imgs.append({"qnum_antes": ultimo_qnum, "b64": b64, "ext": ext})
+
+    # Paragrafos do corpo
+    for para in doc.paragraphs:
+        _processar_para(para)
+    # Paragrafos dentro de celulas de tabela
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    _processar_para(para)
+
+    return "\n".join(linhas), imgs
+
+def _reinjetar_imagens_nos_slides(slides, imgs):
+    """Insere imagens apos a questao de numero correspondente.
+
+    Imagens com qnum_antes=0 (antes de qualquer questao) ou sem correspondencia
+    entram no inicio do array (antes da primeira questao).
+    """
+    if not imgs:
+        return slides
+    # Agrupa imagens por qnum_antes
+    por_q = {}
+    for im in imgs:
+        por_q.setdefault(im["qnum_antes"], []).append(im)
+    qnums_existentes = {s.get("numero") for s in slides if s.get("tipo") == "questao"}
+    novos = []
+    # Imagens com qnum_antes=0 ou nao correspondente vao antes de tudo
+    orfas_keys = [k for k in por_q.keys() if k == 0 or k not in qnums_existentes]
+    for k in orfas_keys:
+        for im in por_q.pop(k, []):
+            novos.append({"tipo":"imagem","img_b64":im["b64"],"img_ext":im["ext"]})
+    for s in slides:
+        novos.append(s)
+        if s.get("tipo") == "questao":
+            q = s.get("numero")
+            for im in por_q.pop(q, []):
+                novos.append({"tipo":"imagem","img_b64":im["b64"],"img_ext":im["ext"]})
+    # Qualquer imagem restante (edge case) joga no final
+    for k, lst in por_q.items():
+        for im in lst:
+            novos.append({"tipo":"imagem","img_b64":im["b64"],"img_ext":im["ext"]})
+    return novos
 
 def _parse_via_claude(texto_bruto, disciplina="", assunto=""):
     """Usa Claude API para extrair questões de qualquer formato de texto."""
@@ -680,7 +789,7 @@ def _parse_docx(filepath):
     RE_ALT_SEP  = re.compile(r'^Alternativas$', re.IGNORECASE)
     def ib(p): return any(r.bold for r in p.runs if r.text.strip())
     def hn(p): return p._element.find('.//' + WS_NS + 'numPr') is not None
-    def has_img(p): return '<w:drawing' in p._element.xml
+    def has_img(p): return _has_img_xml(p._element.xml)
     # Gabarito em tabela
     for tbl in doc.tables:
         for row in tbl.rows:
@@ -721,8 +830,8 @@ def _parse_docx(filepath):
                 if state_in_alts or state_enc:
                     qnum = flush(slides, state_num, state_enc, state_alts, qnum)
                     state_num = None; state_enc = []; state_in_alts = False; state_alts = []
-                ir = _get_img_from_para(para, doc_part)
-                if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+                for ir in _get_imgs_from_para(para, doc_part):
+                    slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
                 continue
             if not txt: continue
             m = RE_NUM_ONLY.match(txt)
@@ -761,13 +870,22 @@ def _parse_docx(filepath):
         while i < len(blocos):
             bloco = blocos[i]
             txts = [p.text.strip() for p in bloco]
+            # Coleta imagens do bloco atual (antes de qualquer decisao)
+            imgs_bloco = []
+            for p in bloco:
+                if has_img(p):
+                    imgs_bloco.extend(_get_imgs_from_para(p, doc_part))
             if any('gabarito' in t.lower() for t in txts):
                 for t in txts:
                     for m in RE_GAB_TX.finditer(t):
                         gqs.append(int(m.group(1))); grs.append(m.group(2).upper())
                 i += 1; continue
-            if is_alt_block(bloco): i += 1; continue
-            enc = ' '.join(txts)
+            if is_alt_block(bloco):
+                # Bloco so de alternativas nao deveria ter imagens, mas se tiver guarda
+                for ir in imgs_bloco:
+                    slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+                i += 1; continue
+            enc = ' '.join(t for t in txts if t)
             if i + 1 < len(blocos) and is_alt_block(blocos[i+1]):
                 qnum += 1
                 alts = []
@@ -775,9 +893,16 @@ def _parse_docx(filepath):
                     m = RE_LETRA_SOLTA.match(t)
                     if m: alts.append(m.group(1).upper() + ') ' + m.group(2).strip())
                 slides.append({'tipo':'questao','numero':qnum,'enunciado':enc,'certo_errado':False,'alternativas':alts})
+                # Imagens vao logo apos a questao (normalmente fazem parte do enunciado)
+                for ir in imgs_bloco:
+                    slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
                 i += 2
             else:
-                slides.append({'tipo':'contexto','texto':enc}); i += 1
+                if enc:
+                    slides.append({'tipo':'contexto','texto':enc})
+                for ir in imgs_bloco:
+                    slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+                i += 1
         gab = {"questoes": gqs, "respostas": grs} if gqs else None
         return slides, gab
 
@@ -788,7 +913,10 @@ def _parse_docx(filepath):
         qnum = 0
         for bloco in blocos:
             txts = [p.text.strip() for p in bloco]
-            imgs_bloco = [(_get_img_from_para(p, doc_part) if has_img(p) else None) for p in bloco]
+            imgs_bloco = []
+            for p in bloco:
+                if has_img(p):
+                    imgs_bloco.extend(_get_imgs_from_para(p, doc_part))
             if any(t.upper() == 'GABARITO' for t in txts):
                 for t in txts:
                     for m in RE_GAB_TX.finditer(t):
@@ -799,7 +927,7 @@ def _parse_docx(filepath):
                 txt_c = ' '.join(t for t in txts if t)
                 if txt_c: slides.append({'tipo':'contexto','texto':txt_c})
                 for ir in imgs_bloco:
-                    if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+                    slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
                 continue
             first_alt = alts_idx[0]
             enc_txt = ' '.join(txts[:first_alt]) if txts[:first_alt] else (txts[0] if txts else '')
@@ -810,7 +938,7 @@ def _parse_docx(filepath):
             ce = len(alts) > 0 and all(RE_CE.match(a) for a in alts)
             slides.append({'tipo':'questao','numero':qnum,'enunciado':enc_txt,'certo_errado':ce,'alternativas':alts if not ce else []})
             for ir in imgs_bloco:
-                if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+                slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
         gab = {"questoes": gqs, "respostas": grs} if gqs else None
         return slides, gab
 
@@ -842,8 +970,8 @@ def _parse_docx(filepath):
             if has_img(para):
                 flush_ce(state_qnum, state_enc, slides)
                 state_qnum = None; state_enc = []
-                ir = _get_img_from_para(para, doc_part)
-                if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+                for ir in _get_imgs_from_para(para, doc_part):
+                    slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
                 continue
             if not txt or txt.upper() == 'GABARITO': continue
             m = RE_NUM_ONLY.match(txt)
@@ -861,8 +989,8 @@ def _parse_docx(filepath):
     while i < len(paras):
         para = paras[i]; txt = para.text.strip()
         if has_img(para):
-            ir = _get_img_from_para(para, doc_part)
-            if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+            for ir in _get_imgs_from_para(para, doc_part):
+                slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
             i += 1; continue
         if not txt: i += 1; continue
         bold = ib(para); m = RE_NUM.match(txt)
@@ -871,8 +999,8 @@ def _parse_docx(filepath):
             while i < len(paras):
                 p2 = paras[i]; t2 = p2.text.strip()
                 if has_img(p2):
-                    ir = _get_img_from_para(p2, doc_part)
-                    if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+                    for ir in _get_imgs_from_para(p2, doc_part):
+                        slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
                     i += 1; continue
                 if not t2: i += 1; continue
                 b2 = ib(p2); m2 = RE_NUM.match(t2)
@@ -894,8 +1022,8 @@ def _parse_docx(filepath):
             while i < len(paras):
                 p2 = paras[i]; t2 = p2.text.strip()
                 if has_img(p2):
-                    ir = _get_img_from_para(p2, doc_part)
-                    if ir: slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
+                    for ir in _get_imgs_from_para(p2, doc_part):
+                        slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
                     i += 1; continue
                 if not t2: i += 1; continue
                 b2 = ib(p2)
@@ -917,6 +1045,14 @@ def _parse_docx(filepath):
             slides.append({'tipo':'questao','numero':qnum,'enunciado':enc2,'certo_errado':ce,'alternativas':alts if not ce else []})
             continue
         i += 1
+    # Varredura extra: imagens dentro de celulas de tabela (nao aparecem em doc.paragraphs)
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                for p_cell in cell.paragraphs:
+                    if has_img(p_cell):
+                        for ir in _get_imgs_from_para(p_cell, doc_part):
+                            slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
     gab = {"questoes": gqs, "respostas": grs} if gqs else None
     return slides, gab
 
@@ -1280,7 +1416,7 @@ def gerar():
                     arq.save(tmp.name); path = tmp.name
                 try:
                     if usar_ia:
-                        texto_bruto = _extrair_texto_docx(path)
+                        texto_bruto, imgs_docx = _extrair_texto_e_imgs_docx(path)
                         resultado = _parse_via_claude(texto_bruto, disc, ass)
                         # Suporta tanto formato antigo (questoes) quanto novo (slides)
                         if "slides" in resultado:
@@ -1297,6 +1433,8 @@ def gerar():
                                 })
                         gab_raw = resultado.get("gabarito", {})
                         gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
+                        # Re-injetar imagens que o Claude nao viu (ele so recebeu texto)
+                        sl = _reinjetar_imagens_nos_slides(sl, imgs_docx)
                     else:
                         sl, gab = _parse_docx(path)
                 finally: os.unlink(path)
