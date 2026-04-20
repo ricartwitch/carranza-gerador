@@ -95,6 +95,25 @@ def _slide_capa(prs, dados):
         first = False; p.alignment = PP_ALIGN.CENTER
         _run(p, txt, bold=bold, sz=sz, color=VINHO)
 
+def _set_space_before(para, pts):
+    """Seta space-before em um a:p do pptx via XML (python-pptx nao tem atalho)."""
+    try:
+        from pptx.oxml.ns import qn as _qn
+        from lxml import etree as _et
+        pPr = para._p.get_or_add_pPr()
+        # Remover spcBef existente
+        for old in pPr.findall(_qn('a:spcBef')):
+            pPr.remove(old)
+        spcBef = _et.SubElement(pPr, _qn('a:spcBef'))
+        spcPts = _et.SubElement(spcBef, _qn('a:spcPts'))
+        # spcPts val em centipontos (1pt = 100)
+        spcPts.set('val', str(int(pts * 100)))
+        # Garantir que o spcBef venha ANTES de elementos de run como buChar etc.
+        # Mover pra primeira posicao do pPr eh mais seguro.
+        pPr.insert(0, spcBef)
+    except Exception:
+        pass
+
 def _slide_conteudo(prs, paragrafos, citacao=None):
     s = prs.slides.add_slide(_blank(prs))
     _pic(s,"logo_carranza",LOGO_MASTER_X,LOGO_MASTER_Y,LOGO_MASTER_CX,LOGO_MASTER_CY)
@@ -104,6 +123,10 @@ def _slide_conteudo(prs, paragrafos, citacao=None):
     for p in paragrafos:
         para = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False; para.alignment = PP_ALIGN.JUSTIFY
+        # Espaco antes (opcional) - separa enunciado da primeira alternativa
+        sb_pt = p.get("space_before_pt")
+        if sb_pt:
+            _set_space_before(para, sb_pt)
         _run(para, p.get("text",""), bold=p.get("bold",False),
              sz=p.get("sz",571500), color=p.get("color",PRETO))
     if citacao:
@@ -121,24 +144,26 @@ def _slide_imagem(prs, img_bytes_b64, img_ext="png"):
     max_w = SLIDE_W - 2 * margin_x
     max_h = RODAPE_Y - margin_y - int(20 * 12700)
     img_bytes = base64.b64decode(img_bytes_b64)
+    # Fit-to-area mantendo aspect ratio — SEM cap em 1.0, ou seja,
+    # amplia a imagem ate ocupar o maximo do slide sem distorcer.
+    w_emu = int(max_w * 0.9); h_emu = int(max_h * 0.9)  # fallback
     try:
         from PIL import Image as PILImage
         pil = PILImage.open(io.BytesIO(img_bytes))
         orig_w, orig_h = pil.size
-        # Usa DPI real da imagem (fallback 96 se ausente)
-        dpi_info = pil.info.get('dpi', (96, 96))
-        dpi_x = dpi_info[0] if dpi_info and dpi_info[0] else 96
-        dpi_y = dpi_info[1] if dpi_info and len(dpi_info) > 1 and dpi_info[1] else dpi_x
-        emu_per_px_x = 914400.0 / dpi_x
-        emu_per_px_y = 914400.0 / dpi_y
-        w_nat = orig_w * emu_per_px_x
-        h_nat = orig_h * emu_per_px_y
-        scale = min(max_w / w_nat, max_h / h_nat, 1.0)
-        w_emu = int(w_nat * scale)
-        h_emu = int(h_nat * scale)
+        if orig_w > 0 and orig_h > 0:
+            ratio = orig_w / orig_h
+            # Descobrir qual dimensao limita (largura ou altura)
+            if max_w / max_h >= ratio:
+                # Altura eh o limite -> ocupa max_h e calcula largura proporcional
+                h_emu = max_h
+                w_emu = int(max_h * ratio)
+            else:
+                # Largura eh o limite -> ocupa max_w e calcula altura proporcional
+                w_emu = max_w
+                h_emu = int(max_w / ratio)
     except Exception:
-        w_emu = int(max_w * 0.9)
-        h_emu = int(min(max_h * 0.9, w_emu * 3 / 4))
+        pass
     left = (SLIDE_W - w_emu) // 2
     top = margin_y + (max_h - h_emu) // 2
     buf = io.BytesIO(img_bytes); buf.seek(0)
@@ -153,13 +178,24 @@ def _slide_gabarito(prs, qs, rs):
     _run(p, "GABARITO", bold=True, sz=304800, color=VINHO)
     n = len(qs)
     if not n: return
+    CINZA_ESCURO = RGBColor(0x59, 0x59, 0x59)  # Office Gray 60%
+    CINZA_CLARO  = RGBColor(0xD9, 0xD9, 0xD9)  # Office Gray 15%
+    BRANCO       = RGBColor(0xFF, 0xFF, 0xFF)
     tbl = s.shapes.add_table(2, n, Emu(2031997), Emu(3058160), Emu(8128005), Emu(741680)).table
     for j, (q, r) in enumerate(zip(qs, rs)):
+        # Linha superior: numero da questao em fundo cinza escuro, texto branco
         c0 = tbl.cell(0,j); c0.text = str(q).zfill(2)
+        try:
+            c0.fill.solid(); c0.fill.fore_color.rgb = CINZA_ESCURO
+        except Exception: pass
         p0 = c0.text_frame.paragraphs[0]; p0.alignment = PP_ALIGN.CENTER
         for ru in p0.runs:
-            ru.font.bold = True; ru.font.size = Pt(18); ru.font.color.rgb = VINHO
+            ru.font.bold = True; ru.font.size = Pt(18); ru.font.color.rgb = BRANCO
+        # Linha inferior: resposta em fundo cinza claro, texto preto
         c1 = tbl.cell(1,j); c1.text = str(r).upper()
+        try:
+            c1.fill.solid(); c1.fill.fore_color.rgb = CINZA_CLARO
+        except Exception: pass
         p1 = c1.text_frame.paragraphs[0]; p1.alignment = PP_ALIGN.CENTER
         for ru in p1.runs:
             ru.font.bold = True; ru.font.size = Pt(18); ru.font.color.rgb = PRETO
@@ -322,11 +358,15 @@ def _sz(te, alts):
 def _distribuir(te, alts, sz):
     grupos, grupo, altura = [], [], _h(te, sz)
     grupo.append({"text": te, "bold": True, "sz": sz})
-    for alt in alts:
+    for i, alt in enumerate(alts):
         ha = _h(alt, sz)
         if altura + ha > AREA_UTIL and grupo:
             grupos.append(grupo); grupo = []; altura = 0
-        grupo.append({"text": alt, "bold": False, "sz": sz})
+        entry = {"text": alt, "bold": False, "sz": sz}
+        # Espaco antes da primeira alternativa (apos o enunciado, no primeiro grupo)
+        if i == 0:
+            entry["space_before_pt"] = 14
+        grupo.append(entry)
         altura += ha
     if grupo: grupos.append(grupo)
     return grupos
@@ -704,7 +744,11 @@ def _build_pptx(payload):
         te = enc if (snum and (enc.startswith(snum+".") or enc.startswith(str(num)+"."))) else (snum+". "+enc if snum else enc)
         if ce:
             sz = _sz(te, ["Certo (  )","Errado (  )"])
-            _slide_conteudo(prs, [{"text":te,"bold":True,"sz":sz},{"text":"Certo (  )","bold":False,"sz":sz},{"text":"Errado (  )","bold":False,"sz":sz}], citacao=next(cit))
+            _slide_conteudo(prs, [
+                {"text":te,"bold":True,"sz":sz},
+                {"text":"Certo (  )","bold":False,"sz":sz,"space_before_pt":14},
+                {"text":"Errado (  )","bold":False,"sz":sz},
+            ], citacao=next(cit))
         elif alts:
             sz = _sz(te, alts)
             grupos = _distribuir(te, alts, sz)
