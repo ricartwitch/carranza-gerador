@@ -137,7 +137,6 @@ def _slide_imagem(prs, img_bytes_b64, img_ext="png"):
         w_emu = int(w_nat * scale)
         h_emu = int(h_nat * scale)
     except Exception:
-        # Fallback: usa proporcao 4:3 ocupando o maximo sem distorcer
         w_emu = int(max_w * 0.9)
         h_emu = int(min(max_h * 0.9, w_emu * 3 / 4))
     left = (SLIDE_W - w_emu) // 2
@@ -643,14 +642,12 @@ def _get_imgs_from_para(para, doc_part):
     if not _has_img_xml(xml):
         return out
     seen = set()
-    # DrawingML moderno (<w:drawing> ... <a:blip r:embed="rIdX"/>)
     for blip in para._element.findall('.//' + NS_A + 'blip'):
         rId = blip.get(NS_R + 'embed') or blip.get(NS_R + 'link')
         if not rId or rId in seen: continue
         seen.add(rId)
         ir = _rel_to_img(doc_part, rId)
         if ir: out.append(ir)
-    # VML legado (<w:pict> ... <v:imagedata r:id="rIdX"/>)
     for imgdata in para._element.findall('.//' + VML_NS + 'imagedata'):
         rId = imgdata.get(NS_R + 'id') or imgdata.get(NS_R + 'embed')
         if not rId or rId in seen: continue
@@ -670,10 +667,10 @@ def _extrair_texto_docx(filepath):
     return texto
 
 def _extrair_texto_e_imgs_docx(filepath):
-    """Extrai texto bruto + imagens do docx.
+    """Extrai texto bruto + imagens do docx (body + tabelas).
 
     Para cada imagem, guarda o numero da ultima questao detectada antes dela
-    (padrao 'N. ...' no inicio da linha). Tambem percorre celulas de tabelas.
+    (padrao 'N. ...' no inicio da linha).
     Retorna (texto, imgs) onde imgs = [{"qnum_antes": int, "b64": str, "ext": str}]
     """
     from docx import Document
@@ -701,7 +698,7 @@ def _extrair_texto_e_imgs_docx(filepath):
     # Paragrafos do corpo
     for para in doc.paragraphs:
         _processar_para(para)
-    # Paragrafos dentro de celulas de tabela
+    # Paragrafos dentro de celulas de tabela (gabaritos, enunciados em tabela, etc.)
     for tbl in doc.tables:
         for row in tbl.rows:
             for cell in row.cells:
@@ -711,20 +708,14 @@ def _extrair_texto_e_imgs_docx(filepath):
     return "\n".join(linhas), imgs
 
 def _reinjetar_imagens_nos_slides(slides, imgs):
-    """Insere imagens apos a questao de numero correspondente.
-
-    Imagens com qnum_antes=0 (antes de qualquer questao) ou sem correspondencia
-    entram no inicio do array (antes da primeira questao).
-    """
+    """Insere imagens apos a questao de numero correspondente."""
     if not imgs:
         return slides
-    # Agrupa imagens por qnum_antes
     por_q = {}
     for im in imgs:
         por_q.setdefault(im["qnum_antes"], []).append(im)
     qnums_existentes = {s.get("numero") for s in slides if s.get("tipo") == "questao"}
     novos = []
-    # Imagens com qnum_antes=0 ou nao correspondente vao antes de tudo
     orfas_keys = [k for k in por_q.keys() if k == 0 or k not in qnums_existentes]
     for k in orfas_keys:
         for im in por_q.pop(k, []):
@@ -735,17 +726,27 @@ def _reinjetar_imagens_nos_slides(slides, imgs):
             q = s.get("numero")
             for im in por_q.pop(q, []):
                 novos.append({"tipo":"imagem","img_b64":im["b64"],"img_ext":im["ext"]})
-    # Qualquer imagem restante (edge case) joga no final
     for k, lst in por_q.items():
         for im in lst:
             novos.append({"tipo":"imagem","img_b64":im["b64"],"img_ext":im["ext"]})
     return novos
 
 def _parse_via_claude(texto_bruto, disciplina="", assunto=""):
-    """Usa Claude API para extrair questões de qualquer formato de texto."""
-    prompt = f"""Você é um extrator de questões de concurso. Analise o texto abaixo e extraia TODAS as questões.
+    """Usa Claude API para extrair questões de qualquer formato de texto.
 
-Retorne APENAS um JSON válido, sem texto antes ou depois, sem marcações markdown, com esta estrutura exata:
+    Sem truncamento artificial: o modelo aceita ate ~200k tokens de contexto.
+    Divide em blocos so se o texto for MUITO grande (>150k chars) para evitar
+    limite de saida.
+    """
+    import json as jsonlib
+
+    def _montar_prompt(bloco, parte_n=None, total_partes=None):
+        sufixo = ""
+        if total_partes and total_partes > 1:
+            sufixo = f"\n\n(Este e o bloco {parte_n} de {total_partes}. Extraia apenas as questoes que aparecem neste bloco.)"
+        return f"""Voce e um extrator de questoes de concurso. Analise o texto abaixo e extraia TODAS as questoes.
+
+Retorne APENAS um JSON valido, sem texto antes ou depois, sem marcacoes markdown, com esta estrutura exata:
 {{
   "questoes": [
     {{
@@ -764,14 +765,39 @@ Retorne APENAS um JSON válido, sem texto antes ou depois, sem marcações markd
 Regras:
 - Capture o enunciado COMPLETO incluindo textos de apoio/excertos antes das alternativas
 - Alternativas sempre no formato "A) texto", "B) texto" etc
-- Se não houver gabarito no texto, retorne gabarito com listas vazias
-- Se for questão Certo/Errado, coloque certo_errado=true e alternativas=[]
-- Numere sequencialmente se não houver numeração explícita
+- Se nao houver gabarito no texto, retorne gabarito com listas vazias
+- Se for questao Certo/Errado, coloque certo_errado=true e alternativas=[]
+- Numere sequencialmente se nao houver numeracao explicita
+- Processe TODAS as questoes do texto, incluindo a ultima. Nao pare no meio.{sufixo}
 
 TEXTO:
-{texto_bruto[:8000]}
+{bloco}
 """
-    return _chamar_claude_api(prompt, max_tokens=4000, timeout=60)
+
+    # Para textos "normais" (ate ~150k chars), uma unica chamada ja resolve.
+    LIMITE_BLOCO = 150000
+    if len(texto_bruto) <= LIMITE_BLOCO:
+        return _chamar_claude_api(_montar_prompt(texto_bruto), max_tokens=16000, timeout=180)
+
+    # Texto enorme: divide por marcadores de questao para nao cortar no meio.
+    RE_Q = re.compile(r'(?=^\d{1,2}\.\s)', re.MULTILINE)
+    pedacos = RE_Q.split(texto_bruto)
+    blocos, atual = [], ""
+    for p in pedacos:
+        if len(atual) + len(p) > LIMITE_BLOCO and atual:
+            blocos.append(atual); atual = p
+        else:
+            atual += p
+    if atual: blocos.append(atual)
+
+    all_q, all_gq, all_gr = [], [], []
+    for i, b in enumerate(blocos):
+        r = _chamar_claude_api(_montar_prompt(b, i+1, len(blocos)), max_tokens=16000, timeout=180)
+        all_q.extend(r.get("questoes", []))
+        gab = r.get("gabarito", {}) or {}
+        all_gq.extend(gab.get("questoes", []))
+        all_gr.extend(gab.get("respostas", []))
+    return {"questoes": all_q, "gabarito": {"questoes": all_gq, "respostas": all_gr}}
 
 def _parse_docx(filepath):
     from docx import Document
@@ -870,7 +896,6 @@ def _parse_docx(filepath):
         while i < len(blocos):
             bloco = blocos[i]
             txts = [p.text.strip() for p in bloco]
-            # Coleta imagens do bloco atual (antes de qualquer decisao)
             imgs_bloco = []
             for p in bloco:
                 if has_img(p):
@@ -881,7 +906,6 @@ def _parse_docx(filepath):
                         gqs.append(int(m.group(1))); grs.append(m.group(2).upper())
                 i += 1; continue
             if is_alt_block(bloco):
-                # Bloco so de alternativas nao deveria ter imagens, mas se tiver guarda
                 for ir in imgs_bloco:
                     slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
                 i += 1; continue
@@ -893,7 +917,6 @@ def _parse_docx(filepath):
                     m = RE_LETRA_SOLTA.match(t)
                     if m: alts.append(m.group(1).upper() + ') ' + m.group(2).strip())
                 slides.append({'tipo':'questao','numero':qnum,'enunciado':enc,'certo_errado':False,'alternativas':alts})
-                # Imagens vao logo apos a questao (normalmente fazem parte do enunciado)
                 for ir in imgs_bloco:
                     slides.append({'tipo':'imagem','img_b64':ir[0],'img_ext':ir[1]})
                 i += 2
@@ -1418,7 +1441,6 @@ def gerar():
                     if usar_ia:
                         texto_bruto, imgs_docx = _extrair_texto_e_imgs_docx(path)
                         resultado = _parse_via_claude(texto_bruto, disc, ass)
-                        # Suporta tanto formato antigo (questoes) quanto novo (slides)
                         if "slides" in resultado:
                             sl = resultado["slides"]
                         else:
