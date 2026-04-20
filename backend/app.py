@@ -209,6 +209,99 @@ def _slide_conteudo_titulado(prs, titulo, paragrafos, citacao=None):
         _run(p2, citacao, bold=True, sz=254000, color=VINHO)
     _faixa_rodape(s)
 
+def _slide_tabela(prs, n_rows, n_cols, cells, titulo=None):
+    """Cria um slide com uma tabela no padrao Carranza.
+
+    cells = [{"r": int, "c": int, "rowspan": int, "colspan": int, "text": str}, ...]
+    Cada item representa uma celula MASTER (os merges ja foram resolvidos).
+    """
+    s = prs.slides.add_slide(_blank(prs))
+    _pic(s,"logo_carranza",LOGO_MASTER_X,LOGO_MASTER_Y,LOGO_MASTER_CX,LOGO_MASTER_CY)
+    if n_rows <= 0 or n_cols <= 0 or not cells:
+        _faixa_rodape(s); return
+
+    # Area util abaixo da logo
+    margin_x = TEXTO_X
+    margin_y = LOGO_MASTER_Y + LOGO_MASTER_CY + 200000
+    # Titulo opcional
+    if titulo:
+        tbx = s.shapes.add_textbox(Emu(margin_x), Emu(margin_y), Emu(SLIDE_W - 2*margin_x), Emu(450000))
+        p_t = tbx.text_frame.paragraphs[0]; p_t.alignment = PP_ALIGN.CENTER
+        _run(p_t, titulo.upper(), bold=True, sz=355600, color=VINHO)
+        margin_y += 500000
+    max_w = SLIDE_W - 2 * margin_x
+    max_h = RODAPE_Y - margin_y - int(30 * 12700)
+
+    # Altura proporcional ao numero de linhas
+    row_h = max(400000, min(800000, max_h // max(1, n_rows)))
+    tbl_h = min(max_h, row_h * n_rows)
+
+    table_shape = s.shapes.add_table(n_rows, n_cols,
+                                     Emu(margin_x), Emu(margin_y),
+                                     Emu(max_w), Emu(tbl_h))
+    tbl = table_shape.table
+
+    # Fonte adaptativa pelo volume de texto
+    total_chars = sum(len(c["text"]) for c in cells)
+    if total_chars > 1500: font_sz = Pt(9)
+    elif total_chars > 1000: font_sz = Pt(10)
+    elif total_chars > 600:  font_sz = Pt(11)
+    elif total_chars > 300:  font_sz = Pt(12)
+    else:                     font_sz = Pt(14)
+
+    # 1) Aplicar merges primeiro (pythonpptx: cell.merge(other))
+    for c in cells:
+        if c["rowspan"] > 1 or c["colspan"] > 1:
+            r0, c0 = c["r"], c["c"]
+            r1 = r0 + c["rowspan"] - 1
+            c1 = c0 + c["colspan"] - 1
+            try:
+                tbl.cell(r0, c0).merge(tbl.cell(r1, c1))
+            except Exception:
+                pass
+
+    # 2) Preencher conteudo e estilo em cada master
+    for c in cells:
+        r0, c0 = c["r"], c["c"]
+        cell = tbl.cell(r0, c0)
+        is_header = (r0 == 0)
+        # Reset
+        cell.text = ""
+        tf = cell.text_frame
+        tf.word_wrap = True
+        # Margens internas menores para aproveitar espaco
+        try:
+            from pptx.util import Inches as _In
+            cell.margin_left = _In(0.06); cell.margin_right = _In(0.06)
+            cell.margin_top  = _In(0.03); cell.margin_bottom = _In(0.03)
+        except Exception: pass
+        lines = [ln for ln in c["text"].split("\n")] or [""]
+        # Remove linhas vazias redundantes no topo
+        while lines and not lines[0].strip(): lines.pop(0)
+        while lines and not lines[-1].strip(): lines.pop()
+        if not lines: lines = [""]
+        first = True
+        for ln in lines:
+            p = tf.paragraphs[0] if first else tf.add_paragraph()
+            first = False
+            p.alignment = PP_ALIGN.CENTER if is_header else PP_ALIGN.LEFT
+            ru = p.add_run(); ru.text = ln
+            ru.font.size = font_sz
+            ru.font.name = "Calibri"
+            if is_header:
+                ru.font.bold = True
+                ru.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            else:
+                ru.font.color.rgb = PRETO
+        # Fundo do header em vinho
+        if is_header:
+            try:
+                cell.fill.solid()
+                cell.fill.fore_color.rgb = VINHO
+            except Exception: pass
+
+    _faixa_rodape(s)
+
 def _slide_enc(prs):
     s = prs.slides.add_slide(_blank(prs))
     _pic(s,"capa_background",0,0,SLIDE_W,SLIDE_H)
@@ -594,6 +687,13 @@ def _build_pptx(payload):
         if tipo == "conteudo_slide":
             _slide_conteudo_titulado(prs, s.get("titulo",""), s.get("paragrafos",[]), citacao=next(cit))
             continue
+        if tipo == "tabela":
+            _slide_tabela(prs,
+                          s.get("n_rows", 0),
+                          s.get("n_cols", 0),
+                          s.get("cells", []),
+                          titulo=s.get("titulo"))
+            continue
         if tipo == "imagem":
             img_b64 = s.get("img_b64",""); img_ext = s.get("img_ext","png")
             if img_b64: _slide_imagem(prs, img_b64, img_ext)
@@ -665,6 +765,177 @@ def _extrair_texto_docx(filepath):
     """Extrai texto bruto do docx para enviar ao Claude (compat)."""
     texto, _ = _extrair_texto_e_imgs_docx(filepath)
     return texto
+
+def _tabela_eh_gabarito(tbl):
+    """Detecta se uma tabela eh so gabarito (ex: celulas '01.E', '02.A').
+    Retorna True se >= 70% das celulas nao-vazias batem padrao de gabarito.
+    """
+    RE_GAB = re.compile(r'^\d{1,2}\.\s*[A-Ea-eVvFfCcEe]\b')
+    n_tot = 0; n_gab = 0
+    for row in tbl.rows:
+        for cell in row.cells:
+            txt = cell.text.strip()
+            if txt:
+                n_tot += 1
+                if RE_GAB.match(txt):
+                    n_gab += 1
+    return n_tot > 0 and (n_gab / n_tot) >= 0.7
+
+def _extrair_tabela_como_dict(tbl):
+    """Converte uma docx.Table em dict pronto para renderizar no PPTX.
+
+    Resolve merges corretamente via OOXML (w:vMerge, w:gridSpan).
+    Retorna {"n_rows", "n_cols", "cells": [{"r","c","rowspan","colspan","text"}]}.
+    """
+    tbl_el = tbl._tbl
+    trs = tbl_el.findall(qn('w:tr'))
+    n_rows = len(trs)
+    if n_rows == 0:
+        return None
+    # Descobrir n_cols pelo tblGrid (quando disponivel) ou por soma de gridSpans
+    tblGrid = tbl_el.find(qn('w:tblGrid'))
+    if tblGrid is not None:
+        n_cols = len(tblGrid.findall(qn('w:gridCol')))
+    else:
+        n_cols = 0
+    if n_cols <= 0:
+        n_cols = 0
+        for tr in trs:
+            col = 0
+            for tc in tr.findall(qn('w:tc')):
+                gs = 1
+                tcPr = tc.find(qn('w:tcPr'))
+                if tcPr is not None:
+                    gsEl = tcPr.find(qn('w:gridSpan'))
+                    if gsEl is not None:
+                        try: gs = int(gsEl.get(qn('w:val'), '1'))
+                        except Exception: pass
+                col += gs
+            if col > n_cols: n_cols = col
+    if n_cols == 0:
+        return None
+
+    def _cell_text(tc):
+        paras = tc.findall(qn('w:p'))
+        lines = []
+        for p in paras:
+            ts = p.findall('.//' + qn('w:t'))
+            lines.append(''.join(t.text or '' for t in ts))
+        return '\n'.join(lines).strip()
+
+    masters = []
+    # Para cada coluna, qual master atualmente aberto (para continuar vMerge)
+    active_col_master = {}
+    for ri, tr in enumerate(trs):
+        col = 0
+        for tc in tr.findall(qn('w:tc')):
+            tcPr = tc.find(qn('w:tcPr'))
+            gs = 1
+            vcont = False; vstart = False
+            if tcPr is not None:
+                gsEl = tcPr.find(qn('w:gridSpan'))
+                if gsEl is not None:
+                    try: gs = int(gsEl.get(qn('w:val'), '1'))
+                    except Exception: pass
+                vm = tcPr.find(qn('w:vMerge'))
+                if vm is not None:
+                    val = vm.get(qn('w:val'))
+                    if val == 'restart': vstart = True
+                    else: vcont = True  # continue (sem val ou val=continue)
+            if vcont and col in active_col_master:
+                # Estender rowspan do master aberto nesta coluna
+                mi = active_col_master[col]
+                masters[mi]["rowspan"] = ri - masters[mi]["r"] + 1
+            else:
+                masters.append({
+                    "r": ri, "c": col,
+                    "rowspan": 1, "colspan": gs,
+                    "text": _cell_text(tc),
+                })
+                active_col_master[col] = len(masters) - 1
+            col += gs
+    return {"n_rows": n_rows, "n_cols": n_cols, "cells": masters}
+
+def _extrair_tabelas_em_ordem(filepath):
+    """Percorre o body do docx em ordem e extrai tabelas nao-gabarito,
+    anotando qual foi a ultima questao vista antes de cada tabela.
+
+    Retorna lista de dicts: [{"qnum_antes", "n_rows", "n_cols", "cells", "titulo"}]
+    """
+    from docx import Document
+    doc = Document(filepath)
+    body = doc.element.body
+    RE_NUM = re.compile(r'^(\d{1,2})\.\s+')
+    ultimo_qnum = 0
+    tbl_idx = 0  # indice sequencial para casar com doc.tables
+    saida = []
+    for child in body.iterchildren():
+        tag = child.tag
+        if tag == qn('w:p'):
+            # pega texto do paragrafo via w:t
+            texts = child.findall('.//' + qn('w:t'))
+            txt = ''.join((t.text or '') for t in texts).strip()
+            m = RE_NUM.match(txt)
+            if m:
+                try: ultimo_qnum = int(m.group(1))
+                except Exception: pass
+        elif tag == qn('w:tbl'):
+            if tbl_idx < len(doc.tables):
+                tbl = doc.tables[tbl_idx]
+                tbl_idx += 1
+                if _tabela_eh_gabarito(tbl):
+                    continue  # gabarito eh processado em outro lugar
+                info = _extrair_tabela_como_dict(tbl)
+                if info:
+                    # Usar primeira celula como titulo se for clara
+                    # (ex: "ALTERAÇÃO ECONÔMICA DO CONTRATO" mergeada em todo o header)
+                    titulo = None
+                    if info["cells"] and info["cells"][0]["r"] == 0 \
+                       and info["cells"][0]["c"] == 0 \
+                       and info["cells"][0]["colspan"] >= info["n_cols"]:
+                        titulo = info["cells"][0]["text"]
+                        # Remove a linha de titulo da tabela
+                        info["cells"] = info["cells"][1:]
+                        info["n_rows"] -= 1
+                        for c in info["cells"]:
+                            c["r"] -= 1
+                    saida.append({
+                        "qnum_antes": ultimo_qnum,
+                        "n_rows": info["n_rows"],
+                        "n_cols": info["n_cols"],
+                        "cells": info["cells"],
+                        "titulo": titulo,
+                    })
+    return saida
+
+def _inserir_slides_tabela(slides, tabelas_info):
+    """Insere slides de tabela apos a questao correspondente."""
+    if not tabelas_info:
+        return slides
+    por_q = {}
+    for t in tabelas_info:
+        por_q.setdefault(t["qnum_antes"], []).append(t)
+    qnums = {s.get("numero") for s in slides if s.get("tipo") == "questao"}
+    novos = []
+    # Tabelas antes da primeira questao
+    for k in list(por_q.keys()):
+        if k == 0 or k not in qnums:
+            for t in por_q.pop(k):
+                novos.append({"tipo":"tabela", "n_rows":t["n_rows"], "n_cols":t["n_cols"],
+                              "cells":t["cells"], "titulo":t.get("titulo")})
+    for s in slides:
+        novos.append(s)
+        if s.get("tipo") == "questao":
+            q = s.get("numero")
+            for t in por_q.pop(q, []):
+                novos.append({"tipo":"tabela", "n_rows":t["n_rows"], "n_cols":t["n_cols"],
+                              "cells":t["cells"], "titulo":t.get("titulo")})
+    # Restos
+    for k, lst in por_q.items():
+        for t in lst:
+            novos.append({"tipo":"tabela", "n_rows":t["n_rows"], "n_cols":t["n_cols"],
+                          "cells":t["cells"], "titulo":t.get("titulo")})
+    return novos
 
 def _extrair_texto_e_imgs_docx(filepath):
     """Extrai texto bruto + imagens do docx (body + tabelas).
@@ -1459,6 +1730,12 @@ def gerar():
                         sl = _reinjetar_imagens_nos_slides(sl, imgs_docx)
                     else:
                         sl, gab = _parse_docx(path)
+                    # Extrair tabelas de conteudo (nao-gabarito) e posicionar no fluxo
+                    try:
+                        tabelas = _extrair_tabelas_em_ordem(path)
+                        sl = _inserir_slides_tabela(sl, tabelas)
+                    except Exception:
+                        traceback.print_exc()
                 finally: os.unlink(path)
             else:
                 # --- TXT → SLIDES (fluxo original) ---
