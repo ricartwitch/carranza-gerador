@@ -344,30 +344,103 @@ def _slide_enc(prs):
     _pic(s,"logo_carranza",LOGO_ENC_X,LOGO_ENC_Y,LOGO_ENC_CX,LOGO_ENC_CY)
 
 def _h(txt, sz):
+    """Estima altura do texto em EMU, respeitando quebras de linha (\n)."""
     if not txt.strip(): return int(sz*0.4)
     cpp = LARGURA / (sz * FATOR)
-    return int(sz * 1.15 * max(1.0, len(txt)/cpp))
+    linhas = 0
+    for seg in txt.split("\n"):
+        linhas += max(1, int((len(seg) + cpp - 1) // cpp))
+    # \n\n adiciona um respiro extra entre paragrafos (~0.4 linha)
+    linhas += txt.count("\n\n") * 0.4
+    return int(sz * 1.15 * max(1.0, linhas))
 
 def _sz(te, alts):
     total = len(te) + sum(len(a) for a in alts)
-    if total > 1200: return 406400
-    if total > 800:  return 444500
-    if total > 500:  return 482600
-    return 533400
+    if total > 1500: return 330200   # 26pt  (enunciados muito longos)
+    if total > 1000: return 355600   # 28pt
+    if total > 800:  return 406400   # 32pt
+    if total > 500:  return 444500   # 35pt
+    if total > 300:  return 482600   # 38pt
+    return 533400                    # 42pt
+
+def _split_enunciado(te, sz):
+    """Divide o enunciado em chunks que cabem em AREA_UTIL.
+
+    Quebra primeiro por paragrafos (linha em branco); se um paragrafo ainda
+    for grande demais, quebra por frases; em ultimo caso faz corte bruto."""
+    import re as _re
+    if _h(te, sz) <= AREA_UTIL:
+        return [te]
+    paras = [p.strip() for p in _re.split(r"\n\s*\n", te) if p.strip()]
+    if not paras:
+        paras = [te]
+
+    def _empacotar_frases(p):
+        frases = _re.split(r"(?<=[\.\!\?])\s+", p)
+        buf, out = "", []
+        for f in frases:
+            tent = (buf + " " + f) if buf else f
+            if _h(tent, sz) <= AREA_UTIL:
+                buf = tent
+            else:
+                if buf: out.append(buf)
+                if _h(f, sz) > AREA_UTIL:
+                    # Corte bruto proporcional ao excesso
+                    chars_max = max(1, int(len(f) * AREA_UTIL / _h(f, sz)))
+                    for i in range(0, len(f), chars_max):
+                        out.append(f[i:i+chars_max])
+                    buf = ""
+                else:
+                    buf = f
+        if buf: out.append(buf)
+        return out
+
+    chunks, atual = [], ""
+    for p in paras:
+        tentativa = (atual + "\n\n" + p) if atual else p
+        if _h(tentativa, sz) <= AREA_UTIL:
+            atual = tentativa
+        else:
+            if atual:
+                chunks.append(atual); atual = ""
+            if _h(p, sz) > AREA_UTIL:
+                chunks.extend(_empacotar_frases(p))
+            else:
+                atual = p
+    if atual: chunks.append(atual)
+    return chunks
+
 
 def _distribuir(te, alts, sz):
-    grupos, grupo, altura = [], [], _h(te, sz)
-    grupo.append({"text": te, "bold": True, "sz": sz})
-    for i, alt in enumerate(alts):
+    """Distribui enunciado + alternativas em grupos (= slides) que cabem.
+
+    Correcao: o enunciado agora eh quebrado em multiplos slides se nao
+    couber em um so. Antes, um enunciado gigante era empurrado inteiro
+    num unico slide e estourava a margem inferior.
+    """
+    grupos = []
+    enunciado_chunks = _split_enunciado(te, sz)
+    # Chunks iniciais do enunciado viram slides dedicados
+    for ch in enunciado_chunks[:-1]:
+        grupos.append([{"text": ch, "bold": True, "sz": sz}])
+    # Ultimo chunk do enunciado + alternativas (com quebra por altura)
+    grupo = [{"text": enunciado_chunks[-1], "bold": True, "sz": sz}]
+    altura = _h(enunciado_chunks[-1], sz)
+    primeira_alt = True
+    for alt in alts:
         ha = _h(alt, sz)
-        if altura + ha > AREA_UTIL and grupo:
+        if primeira_alt:
+            entry = {"text": alt, "bold": False, "sz": sz, "space_before_pt": 14}
+            extra = 14 * 12700
+        else:
+            entry = {"text": alt, "bold": False, "sz": sz}
+            extra = 0
+        if altura + ha + extra > AREA_UTIL and grupo:
             grupos.append(grupo); grupo = []; altura = 0
-        entry = {"text": alt, "bold": False, "sz": sz}
-        # Espaco antes da primeira alternativa (apos o enunciado, no primeiro grupo)
-        if i == 0:
-            entry["space_before_pt"] = 14
+            entry.pop("space_before_pt", None)
         grupo.append(entry)
-        altura += ha
+        altura += ha + extra
+        primeira_alt = False
     if grupo: grupos.append(grupo)
     return grupos
 
