@@ -260,47 +260,53 @@ function showProgresso(segundos) {
   m.textContent = '⏳ Processando... (' + fmtTempo(segundos) + ') — não feche a página, a conexão é mantida por polling.';
 }
 
-async function esperarJob(jobId) {
-  // Polling a cada 2s. Sem limite de tempo no browser.
-  let tentativasFalhaRede = 0;
-  let notFoundSeguidos = 0;
-  const MAX_FALHAS_REDE = 10;
-  const MAX_NOT_FOUND = 5;
+function base64ToBlob(b64, mime) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime || 'application/octet-stream' });
+}
+
+async function processarStream(resp) {
+  // Le o body como NDJSON (uma mensagem por linha).
+  // Retorna a mensagem final ({status:'done'}) ou lanca em caso de erro.
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
   while (true) {
-    await new Promise(r => setTimeout(r, 2000));
-    let resp;
-    try {
-      resp = await fetch(API + '/status/' + jobId);
-    } catch(e) {
-      tentativasFalhaRede++;
-      if (tentativasFalhaRede > MAX_FALHAS_REDE) {
-        throw new Error('Perda de conexão com o servidor. Tente recarregar a página e enviar de novo.');
-      }
-      continue;
-    }
-    tentativasFalhaRede = 0;
-    if (!resp.ok) {
-      if (resp.status === 404) {
-        notFoundSeguidos++;
-        // Tenta detectar: endpoint nao existe (deploy desatualizado) vs job expirado
-        const contentType = resp.headers.get('content-type') || '';
-        if (!contentType.includes('application/json')) {
-          throw new Error('O endpoint /status não existe no servidor. Provável: o deploy novo ainda não subiu. Abra ' + API + '/versao no navegador para checar.');
-        }
-        if (notFoundSeguidos >= MAX_NOT_FOUND) {
-          throw new Error('Job não encontrado no servidor. O processo pode ter sido reiniciado. Tente enviar o arquivo novamente.');
-        }
-        showProgresso(0);
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // Processar linhas completas (separadas por \n)
+    let idx;
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      const linha = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!linha) continue;
+      let msg;
+      try { msg = JSON.parse(linha); }
+      catch(e) {
+        console.warn('Linha nao-JSON no stream:', linha.slice(0, 120));
         continue;
       }
-      throw new Error('Status HTTP ' + resp.status);
+      if (msg.status === 'processando') {
+        showProgresso(msg.elapsed_s || 0);
+      } else if (msg.status === 'erro') {
+        throw new Error(msg.erro || 'Erro no processamento');
+      } else if (msg.status === 'done') {
+        return msg;
+      }
     }
-    notFoundSeguidos = 0;
-    const s = await resp.json();
-    if (s.status === 'done') return s;
-    if (s.status === 'erro') throw new Error(s.erro || 'Erro no processamento');
-    showProgresso(s.elapsed_s || 0);
   }
+  // Se sobrou algo no buffer sem \n no final
+  if (buffer.trim()) {
+    try {
+      const msg = JSON.parse(buffer.trim());
+      if (msg.status === 'done') return msg;
+      if (msg.status === 'erro') throw new Error(msg.erro || 'Erro no processamento');
+    } catch(_) {}
+  }
+  throw new Error('Conexão encerrada sem resposta final do servidor.');
 }
 
 async function gerar() {
@@ -315,7 +321,7 @@ async function gerar() {
   const isWord = formato === 'slides_to_word' || formato === 'word_to_word';
   const sizeMB = file.size / (1024*1024);
   if (usarIA && sizeMB > 0.5) {
-    showMsg('⏳ Arquivo grande com IA: processamento em background. Acompanhe o progresso abaixo.', true);
+    showMsg('⏳ Arquivo grande com IA: processamento em andamento. Não feche a página.', true);
   } else {
     showMsg('⏳ Enviando arquivo...', true);
   }
@@ -330,38 +336,35 @@ async function gerar() {
     fd.append('formato', formato);
     fd.append('usar_ia', usarIA ? '1' : '0');
 
-    // 1) Enviar arquivo e obter job_id (resposta rapida)
-    const resp = await fetch(API + '/iniciar', { method: 'POST', body: fd });
+    // Single request: envia arquivo e consome stream NDJSON com heartbeats.
+    const resp = await fetch(API + '/gerar-stream', { method: 'POST', body: fd });
     if (!resp.ok) {
       let errTxt = 'Erro ' + resp.status;
       try { const e = await resp.json(); if (e && e.erro) errTxt = e.erro; } catch(_) {}
       throw new Error(errTxt);
     }
-    const iniciado = await resp.json();
-    if (!iniciado.job_id) throw new Error('Resposta invalida do servidor (sem job_id)');
-
-    // 2) Polling ate ficar pronto — quanto tempo precisar
-    await esperarJob(iniciado.job_id);
-
-    // 3) Baixar arquivo pronto
-    const respDl = await fetch(API + '/download/' + iniciado.job_id);
-    if (!respDl.ok) {
-      let errTxt = 'Erro ao baixar: ' + respDl.status;
-      try { const e = await respDl.json(); if (e && e.erro) errTxt = e.erro; } catch(_) {}
-      throw new Error(errTxt);
+    const ct = resp.headers.get('content-type') || '';
+    if (!ct.includes('ndjson') && !ct.includes('json')) {
+      throw new Error('Servidor nao retornou stream. Verifique se o deploy mais recente subiu.');
     }
-    const blob = await respDl.blob();
+
+    const msgFinal = await processarStream(resp);
+
+    // msgFinal.data = arquivo em base64
+    const blob = base64ToBlob(msgFinal.data, msgFinal.mime);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const disc = document.getElementById('disciplina').value.replace(/ /g,'_') || 'Carranza';
     const ext = isWord ? '.docx' : '.pptx';
-    a.href = url; a.download = 'Carranza_' + disc + ext; a.click();
+    a.href = url;
+    a.download = msgFinal.filename || ('Carranza_' + disc + ext);
+    a.click();
     URL.revokeObjectURL(url);
     showMsg(isWord ? '✅ Documento Word gerado com sucesso!' : '✅ Slides gerados com sucesso!', true);
   } catch(e) {
     let msg = e && e.message ? e.message : String(e);
     if (/failed to fetch|networkerror|load failed/i.test(msg)) {
-      msg = 'Falha de conexão com o servidor. Verifique sua internet e tente novamente.';
+      msg = 'Falha de conexão com o servidor. Tente novamente em alguns segundos.';
     }
     showMsg('❌ ' + msg, false);
   } finally {
