@@ -2085,34 +2085,103 @@ def _executar_pipeline(arq_path, fname, disc, ass, prof, tipo, formato, usar_ia,
 
 
 # =========================================================================
-# JOBS ASSINCRONOS (evita "Failed to fetch" em arquivos grandes)
+# JOBS ASSINCRONOS (persistidos em disco para sobreviver restarts/workers)
 # =========================================================================
 import threading as _threading
 import uuid as _uuid
 import time as _time
+import json as _json
 
-JOBS = {}            # job_id -> dict com status/buf/mime/...
-JOBS_LOCK = _threading.Lock()
-JOB_TTL_DONE = 30 * 60    # remove job concluido apos 30 min sem download
-JOB_TTL_MAX  = 120 * 60   # limite absoluto de 2h em qualquer estado
+# Diretorio de jobs - pode ser sobrescrito por env var (ex: no Render, usar
+# um disco persistente). Default /tmp sobrevive dentro do mesmo container.
+JOBS_DIR = os.environ.get("JOBS_DIR", "/tmp/carranza_jobs")
+try: os.makedirs(JOBS_DIR, exist_ok=True)
+except Exception: pass
+JOBS_LOCK = _threading.Lock()  # apenas para serializar escritas no mesmo processo
+JOB_TTL_DONE = 30 * 60       # 30 min apos done
+JOB_TTL_MAX  = 180 * 60      # 3h absoluto
+JOB_TTL_ZOMBI = 30 * 60      # 30 min processando sem finalizar => marca como erro
+
+def _job_path(job_id, ext):
+    """Caminho absoluto de um arquivo do job. ext = 'json' | 'out' | 'in'."""
+    # Sanitiza job_id (so aceita hex)
+    safe = re.sub(r'[^a-fA-F0-9]', '', job_id or '')
+    if not safe: return None
+    return os.path.join(JOBS_DIR, safe + "." + ext)
+
+def _save_meta(job_id, meta):
+    """Escreve meta (dict) em disco atomicamente."""
+    path = _job_path(job_id, "json")
+    if not path: return
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(meta, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        traceback.print_exc()
+        try: os.unlink(tmp)
+        except Exception: pass
+
+def _load_meta(job_id):
+    path = _job_path(job_id, "json")
+    if not path or not os.path.exists(path): return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:
+        return None
+
+def _save_output(job_id, buf, mime, filename):
+    out_path = _job_path(job_id, "out")
+    if not out_path: return False
+    try:
+        buf.seek(0)
+        with open(out_path, "wb") as f:
+            f.write(buf.read())
+        meta = _load_meta(job_id) or {}
+        meta.update(status="done", mime=mime, filename=filename,
+                    done_at=_time.time())
+        _save_meta(job_id, meta)
+        return True
+    except Exception:
+        traceback.print_exc()
+        return False
+
+def _remove_job(job_id):
+    for ext in ("json", "out", "in"):
+        p = _job_path(job_id, ext)
+        if p and os.path.exists(p):
+            try: os.unlink(p)
+            except Exception: pass
 
 def _cleanup_jobs_loop():
-    """Thread de limpeza: remove jobs velhos para nao vazar memoria."""
+    """Remove jobs velhos do disco. Detecta zumbis e marca como erro."""
     while True:
         try:
             _time.sleep(60)
             now = _time.time()
-            with JOBS_LOCK:
-                remove = []
-                for jid, j in JOBS.items():
-                    age = now - j.get("started_at", now)
-                    if j.get("status") == "done":
-                        dsince = now - j.get("done_at", now)
-                        if dsince > JOB_TTL_DONE: remove.append(jid)
-                    if age > JOB_TTL_MAX:
-                        remove.append(jid)
-                for jid in set(remove):
-                    JOBS.pop(jid, None)
+            if not os.path.isdir(JOBS_DIR): continue
+            for nome in os.listdir(JOBS_DIR):
+                if not nome.endswith(".json"): continue
+                job_id = nome[:-5]
+                meta = _load_meta(job_id)
+                if not meta: continue
+                started = meta.get("started_at", now)
+                status = meta.get("status", "processando")
+                age = now - started
+                if status == "done":
+                    dsince = now - meta.get("done_at", now)
+                    if dsince > JOB_TTL_DONE:
+                        _remove_job(job_id)
+                elif status == "processando" and age > JOB_TTL_ZOMBI:
+                    # Zumbi: worker provavelmente morreu
+                    meta.update(status="erro",
+                                erro="Processamento interrompido (reinicio do servidor). Tente novamente.",
+                                done_at=now)
+                    _save_meta(job_id, meta)
+                elif age > JOB_TTL_MAX:
+                    _remove_job(job_id)
         except Exception:
             traceback.print_exc()
 
@@ -2120,28 +2189,23 @@ _threading.Thread(target=_cleanup_jobs_loop, daemon=True).start()
 
 
 def _runner_job(job_id, arq_path, fname, disc, ass, prof, tipo, formato, usar_ia):
-    """Executa o pipeline em thread e atualiza o JOBS dict."""
+    """Executa o pipeline em thread e persiste resultado em disco."""
     try:
         buf, mime, filename = _executar_pipeline(
             arq_path, fname, disc, ass, prof, tipo, formato, usar_ia
         )
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id].update(
-                    status="done",
-                    buf=buf,
-                    mime=mime,
-                    filename=filename,
-                    done_at=_time.time(),
-                )
+        ok = _save_output(job_id, buf, mime, filename)
+        if not ok:
+            meta = _load_meta(job_id) or {}
+            meta.update(status="erro", erro="Falha ao salvar arquivo gerado",
+                        done_at=_time.time())
+            _save_meta(job_id, meta)
     except Exception as e:
         traceback.print_exc()
-        with JOBS_LOCK:
-            if job_id in JOBS:
-                JOBS[job_id].update(status="erro", erro=str(e),
-                                    done_at=_time.time())
+        meta = _load_meta(job_id) or {}
+        meta.update(status="erro", erro=str(e), done_at=_time.time())
+        _save_meta(job_id, meta)
     finally:
-        # Remover arquivo temporario
         try:
             if arq_path and os.path.exists(arq_path):
                 os.unlink(arq_path)
@@ -2225,24 +2289,29 @@ def gerar():
 # ---- Endpoints assincronos (evita timeout em arquivos grandes) ----
 @app.route("/iniciar", methods=["POST"])
 def iniciar():
-    """Aceita upload, dispara processamento em thread, retorna job_id."""
+    """Aceita upload, persiste meta em disco, dispara thread, retorna job_id."""
     try:
         params, err = _coletar_params()
         if err: return jsonify({"erro": err[0]}), err[1]
         arq = params["arq"]
         fname = arq.filename or "upload"
-        suffix = "." + (fname.rsplit(".", 1)[-1] if "." in fname else "bin")
-        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-        arq.save(tmp.name); tmp.close()
         job_id = _uuid.uuid4().hex
-        with JOBS_LOCK:
-            JOBS[job_id] = {
-                "status": "processando",
-                "started_at": _time.time(),
-            }
+        # Salvar upload em JOBS_DIR/<id>.in (evita depender de /tmp/tmpXXX)
+        in_path = _job_path(job_id, "in")
+        arq.save(in_path)
+        # Escrever meta inicial ANTES de dar o return — garante que /status
+        # logo depois sempre encontra o job.
+        meta = {
+            "status": "processando",
+            "started_at": _time.time(),
+            "fname": fname,
+            "formato": params["formato"],
+        }
+        _save_meta(job_id, meta)
+        # Disparar processamento em thread
         th = _threading.Thread(
             target=_runner_job,
-            args=(job_id, tmp.name, fname,
+            args=(job_id, in_path, fname,
                   params["disc"], params["ass"], params["prof"],
                   params["tipo"], params["formato"], params["usar_ia"]),
             daemon=True,
@@ -2256,39 +2325,42 @@ def iniciar():
 
 @app.route("/status/<job_id>", methods=["GET"])
 def status_job(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return jsonify({"status": "nao_encontrado"}), 404
-        resp = {"status": job.get("status", "processando")}
-        started = job.get("started_at", _time.time())
-        resp["elapsed_s"] = int(_time.time() - started)
-        if job.get("status") == "erro":
-            resp["erro"] = job.get("erro", "")
-        if job.get("status") == "done":
-            resp["filename"] = job.get("filename")
+    meta = _load_meta(job_id)
+    if not meta:
+        return jsonify({"status": "nao_encontrado"}), 404
+    resp = {"status": meta.get("status", "processando")}
+    started = meta.get("started_at", _time.time())
+    resp["elapsed_s"] = int(_time.time() - started)
+    if meta.get("status") == "erro":
+        resp["erro"] = meta.get("erro", "")
+    if meta.get("status") == "done":
+        resp["filename"] = meta.get("filename")
     return jsonify(resp)
 
 
 @app.route("/download/<job_id>", methods=["GET"])
 def download_job(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return jsonify({"erro": "Job nao encontrado"}), 404
-        if job.get("status") != "done":
-            return jsonify({"erro": "Job ainda nao finalizado",
-                            "status": job.get("status")}), 400
-        buf = job.get("buf")
-        mime = job.get("mime")
-        filename = job.get("filename")
-        # Remover job apos entrega para liberar memoria
-        JOBS.pop(job_id, None)
+    meta = _load_meta(job_id)
+    if not meta:
+        return jsonify({"erro": "Job nao encontrado"}), 404
+    if meta.get("status") != "done":
+        return jsonify({"erro": "Job ainda nao finalizado",
+                        "status": meta.get("status")}), 400
+    out_path = _job_path(job_id, "out")
+    if not out_path or not os.path.exists(out_path):
+        return jsonify({"erro": "Arquivo gerado nao encontrado (pode ter expirado)"}), 404
+    # Ler em memoria para conseguir limpar arquivos antes de enviar
     try:
-        buf.seek(0)
-    except Exception:
-        pass
-    return send_file(buf, mimetype=mime, as_attachment=True, download_name=filename)
+        with open(out_path, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        return jsonify({"erro": f"Falha ao ler arquivo: {e}"}), 500
+    mime = meta.get("mime", "application/octet-stream")
+    filename = meta.get("filename", "download.bin")
+    # Limpar arquivos do job apos ler
+    _remove_job(job_id)
+    return send_file(io.BytesIO(data), mimetype=mime,
+                     as_attachment=True, download_name=filename)
 
 
 if __name__ == "__main__":
