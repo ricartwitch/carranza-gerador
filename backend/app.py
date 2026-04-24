@@ -2222,7 +2222,7 @@ CORS(app, origins="*")
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
 
-APP_VERSION = "2026.04.24-async-disk-v2"
+APP_VERSION = "2026.04.24-stream-v1"
 
 @app.route("/", methods=["GET"])
 def health():
@@ -2239,7 +2239,14 @@ def versao():
         jobs_dir_ok, jobs_count = False, 0
     return jsonify({
         "version": APP_VERSION,
-        "endpoints": ["/", "/versao", "/gerar", "/iniciar", "/status/<id>", "/download/<id>"],
+        "endpoints": [
+            "/", "/versao",
+            "/gerar",          # sincrono (compat)
+            "/gerar-stream",   # NDJSON streaming (recomendado)
+            "/iniciar",        # polling (compat)
+            "/status/<id>",
+            "/download/<id>",
+        ],
         "jobs_dir": JOBS_DIR,
         "jobs_dir_ok": jobs_dir_ok,
         "jobs_abertos": jobs_count,
