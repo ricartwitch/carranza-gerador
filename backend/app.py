@@ -1,6 +1,6 @@
 import os, io, re, traceback, tempfile, base64, shutil, copy
 from itertools import cycle
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 from pptx import Presentation
 from pptx.util import Emu, Pt
@@ -2393,6 +2393,105 @@ def download_job(job_id):
     _remove_job(job_id)
     return send_file(io.BytesIO(data), mimetype=mime,
                      as_attachment=True, download_name=filename)
+
+
+# =========================================================================
+# STREAMING SINCRONO (single-request, imune a redeploy/spin-down)
+# =========================================================================
+@app.route("/gerar-stream", methods=["POST"])
+def gerar_stream():
+    """Endpoint single-request que processa e devolve o arquivo num SO
+    stream HTTP, com heartbeats JSON a cada 2s pra manter a conexao viva.
+
+    Formato NDJSON (uma mensagem por linha):
+      {"status":"processando","elapsed_s":3}
+      {"status":"processando","elapsed_s":5}
+      ...
+      {"status":"done","filename":"X.docx","mime":"...","data":"<base64>"}
+
+    Em caso de erro: {"status":"erro","erro":"mensagem"}
+
+    Vantagens vs polling: 1 conexao TCP so, nao depende de estado em disco,
+    nao sofre com redeploy do Render nem com spin-down.
+    """
+    import json as _json, base64 as _base64
+    try:
+        params, err = _coletar_params()
+        if err: return jsonify({"erro": err[0]}), err[1]
+        arq = params["arq"]
+        fname = arq.filename or "upload"
+        suffix = "." + (fname.rsplit(".", 1)[-1] if "." in fname else "bin")
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        arq.save(tmp.name); tmp.close()
+        arq_path = tmp.name
+
+        # Estado compartilhado entre thread worker e generator
+        result = {
+            "done": False, "buf": None, "mime": None,
+            "filename": None, "error": None,
+        }
+
+        def _worker():
+            try:
+                buf, mime, filename = _executar_pipeline(
+                    arq_path, fname,
+                    params["disc"], params["ass"], params["prof"],
+                    params["tipo"], params["formato"], params["usar_ia"]
+                )
+                result["buf"] = buf
+                result["mime"] = mime
+                result["filename"] = filename
+            except Exception as e:
+                traceback.print_exc()
+                result["error"] = str(e)
+            finally:
+                result["done"] = True
+                try:
+                    if os.path.exists(arq_path): os.unlink(arq_path)
+                except Exception: pass
+
+        th = _threading.Thread(target=_worker, daemon=True)
+        th.start()
+
+        def _stream():
+            started = _time.time()
+            # Heartbeat inicial imediato
+            yield _json.dumps({"status": "processando", "elapsed_s": 0}) + "\n"
+            # Heartbeat a cada 2s enquanto processa
+            while not result["done"]:
+                _time.sleep(2)
+                elapsed = int(_time.time() - started)
+                yield _json.dumps({"status": "processando", "elapsed_s": elapsed}) + "\n"
+            # Terminou — enviar resultado ou erro
+            if result["error"]:
+                yield _json.dumps({"status": "erro", "erro": result["error"]}) + "\n"
+                return
+            buf = result["buf"]
+            try: buf.seek(0)
+            except Exception: pass
+            data_bytes = buf.read() if buf else b""
+            b64 = _base64.b64encode(data_bytes).decode("ascii")
+            yield _json.dumps({
+                "status": "done",
+                "filename": result["filename"],
+                "mime": result["mime"],
+                "size": len(data_bytes),
+                "data": b64,
+            }) + "\n"
+
+        return Response(
+            stream_with_context(_stream()),
+            mimetype="application/x-ndjson",
+            headers={
+                # Desabilita buffering em proxies (essencial para heartbeat)
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"erro": str(e)}), 500
 
 
 if __name__ == "__main__":
