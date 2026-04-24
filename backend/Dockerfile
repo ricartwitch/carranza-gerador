@@ -9,4 +9,12 @@ COPY . .
 
 EXPOSE 10000
 
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000", "--timeout", "120"]
+CMD ["gunicorn", "app:app", \
+     "--bind", "0.0.0.0:10000", \
+     "--timeout", "600", \
+     "--workers", "1", \
+     "--threads", "3", \
+     "--worker-class", "gthread", \
+     "--graceful-timeout", "30", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]
