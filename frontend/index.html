@@ -247,6 +247,50 @@ function showMsg(txt, ok) {
   m.textContent = txt; m.className = 'msg ' + (ok ? 'ok' : 'err'); m.style.display = 'block';
 }
 
+function fmtTempo(s) {
+  if (s < 60) return s + 's';
+  const m = Math.floor(s/60), r = s%60;
+  return m + 'min ' + r + 's';
+}
+
+function showProgresso(segundos) {
+  const m = document.getElementById('msg');
+  m.className = 'msg ok';
+  m.style.display = 'block';
+  m.textContent = '⏳ Processando... (' + fmtTempo(segundos) + ') — não feche a página, a conexão é mantida por polling.';
+}
+
+async function esperarJob(jobId) {
+  // Polling a cada 2s. Sem limite de tempo no browser — respeitamos o que o
+  // servidor decidir (ele vai marcar erro ou done eventualmente).
+  let tentativasFalhaRede = 0;
+  const MAX_FALHAS_REDE = 10;
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    let resp;
+    try {
+      resp = await fetch(API + '/status/' + jobId);
+    } catch(e) {
+      // Falha de rede transitoria — continuar tentando
+      tentativasFalhaRede++;
+      if (tentativasFalhaRede > MAX_FALHAS_REDE) {
+        throw new Error('Perda de conexão com o servidor. Tente recarregar a página e enviar de novo.');
+      }
+      continue;
+    }
+    tentativasFalhaRede = 0;
+    if (!resp.ok) {
+      if (resp.status === 404) throw new Error('Job não encontrado no servidor.');
+      throw new Error('Status HTTP ' + resp.status);
+    }
+    const s = await resp.json();
+    if (s.status === 'done') return s;
+    if (s.status === 'erro') throw new Error(s.erro || 'Erro no processamento');
+    // Ainda processando
+    showProgresso(s.elapsed_s || 0);
+  }
+}
+
 async function gerar() {
   const file = document.getElementById('file').files[0];
   const formato = document.getElementById('formato').value;
@@ -256,10 +300,12 @@ async function gerar() {
   btn.disabled = true; btn.classList.add('loading');
   document.getElementById('msg').style.display = 'none';
 
-  // Aviso para arquivos grandes + modo IA
+  const isWord = formato === 'slides_to_word' || formato === 'word_to_word';
   const sizeMB = file.size / (1024*1024);
-  if (usarIA && sizeMB > 0.8) {
-    showMsg('⏳ Arquivo grande com IA: pode levar de 1 a 5 minutos. Não feche a página.', true);
+  if (usarIA && sizeMB > 0.5) {
+    showMsg('⏳ Arquivo grande com IA: processamento em background. Acompanhe o progresso abaixo.', true);
+  } else {
+    showMsg('⏳ Enviando arquivo...', true);
   }
 
   try {
@@ -272,38 +318,38 @@ async function gerar() {
     fd.append('formato', formato);
     fd.append('usar_ia', usarIA ? '1' : '0');
 
-    // AbortController para dar feedback claro caso o browser fique muito tempo
-    // aguardando e o usuario queira cancelar. Nao limita timeout — deixa o
-    // servidor controlar via gunicorn.
-    const resp = await fetch(API + '/gerar', {
-      method: 'POST',
-      body: fd,
-      // keepalive nao pode ser usado com body grande; deixamos desligado
-    });
-
+    // 1) Enviar arquivo e obter job_id (resposta rapida)
+    const resp = await fetch(API + '/iniciar', { method: 'POST', body: fd });
     if (!resp.ok) {
       let errTxt = 'Erro ' + resp.status;
-      try {
-        const err = await resp.json();
-        if (err && err.erro) errTxt = err.erro;
-      } catch(_) {}
+      try { const e = await resp.json(); if (e && e.erro) errTxt = e.erro; } catch(_) {}
       throw new Error(errTxt);
     }
+    const iniciado = await resp.json();
+    if (!iniciado.job_id) throw new Error('Resposta invalida do servidor (sem job_id)');
 
-    const blob = await resp.blob();
+    // 2) Polling ate ficar pronto — quanto tempo precisar
+    await esperarJob(iniciado.job_id);
+
+    // 3) Baixar arquivo pronto
+    const respDl = await fetch(API + '/download/' + iniciado.job_id);
+    if (!respDl.ok) {
+      let errTxt = 'Erro ao baixar: ' + respDl.status;
+      try { const e = await respDl.json(); if (e && e.erro) errTxt = e.erro; } catch(_) {}
+      throw new Error(errTxt);
+    }
+    const blob = await respDl.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const disc = document.getElementById('disciplina').value.replace(/ /g,'_') || 'Carranza';
-    const ext = (formato === 'slides_to_word' || formato === 'word_to_word') ? '.docx' : '.pptx';
+    const ext = isWord ? '.docx' : '.pptx';
     a.href = url; a.download = 'Carranza_' + disc + ext; a.click();
     URL.revokeObjectURL(url);
-    const isWord = formato === 'slides_to_word' || formato === 'word_to_word';
     showMsg(isWord ? '✅ Documento Word gerado com sucesso!' : '✅ Slides gerados com sucesso!', true);
   } catch(e) {
-    // "Failed to fetch" geralmente = servidor demorou demais e cortou a conexao
     let msg = e && e.message ? e.message : String(e);
     if (/failed to fetch|networkerror|load failed/i.test(msg)) {
-      msg = 'O servidor demorou demais para responder. Isso costuma acontecer com arquivos grandes usando IA. Tente: (1) desmarcar "Usar IA" e reenviar; (2) dividir o documento em partes menores; ou (3) aguardar 30s e tentar novamente.';
+      msg = 'Falha de conexão com o servidor. Verifique sua internet e tente novamente.';
     }
     showMsg('❌ ' + msg, false);
   } finally {
