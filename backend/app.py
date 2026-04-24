@@ -681,6 +681,145 @@ def _gerar_docx(payload):
         t2.text = enunciado
         return p_el
 
+    # ---- Helpers para tipos adicionais (tabela, imagem) ----
+    def _sombrear_celula(cell, hex_fill):
+        """Aplica fundo colorido em uma celula (w:shd)."""
+        tcPr = cell._tc.get_or_add_tcPr()
+        for old in tcPr.findall(qn('w:shd')):
+            tcPr.remove(old)
+        shd = etree.SubElement(tcPr, qn('w:shd'))
+        shd.set(qn('w:val'), 'clear')
+        shd.set(qn('w:color'), 'auto')
+        shd.set(qn('w:fill'), hex_fill)
+
+    def _aplicar_bordas_tabela(tbl, color='BFBFBF', sz='4'):
+        """Bordas finas cinzas em todos os lados + entre celulas."""
+        tblPr = tbl._tbl.find(qn('w:tblPr'))
+        if tblPr is None:
+            tblPr = etree.SubElement(tbl._tbl, qn('w:tblPr'))
+            tbl._tbl.insert(0, tblPr)
+        borders = tblPr.find(qn('w:tblBorders'))
+        if borders is None:
+            borders = etree.SubElement(tblPr, qn('w:tblBorders'))
+        for b_name in ('top','left','bottom','right','insideH','insideV'):
+            tag = qn('w:' + b_name)
+            b = borders.find(tag)
+            if b is None:
+                b = etree.SubElement(borders, tag)
+            b.set(qn('w:val'), 'single')
+            b.set(qn('w:sz'), sz)
+            b.set(qn('w:color'), color)
+
+    def _estilizar_celula(cell, text, is_header):
+        """Preenche celula com texto multi-linha e aplica tipografia."""
+        lines = [ln for ln in (text or "").split("\n")]
+        # Remove linhas vazias no topo/fim
+        while lines and not lines[0].strip(): lines.pop(0)
+        while lines and not lines[-1].strip(): lines.pop()
+        if not lines: lines = [""]
+        # Resetar o primeiro paragrafo (que sempre existe numa celula recem-criada)
+        cell.text = ""
+        first_p = cell.paragraphs[0]
+        def _fmt(p, text):
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER if is_header else WD_ALIGN_PARAGRAPH.LEFT
+            run = p.add_run(text)
+            run.font.name = 'Calibri'
+            run.font.size = DocxPt(10 if is_header else 10)
+            if is_header:
+                run.font.bold = True
+                run.font.color.rgb = DocxRGB(0xFF, 0xFF, 0xFF)
+            else:
+                run.font.color.rgb = DocxRGB(0x33, 0x33, 0x33)
+        _fmt(first_p, lines[0])
+        for ln in lines[1:]:
+            _fmt(cell.add_paragraph(), ln)
+
+    def _add_tabela_docx(n_rows, n_cols, cells, titulo=None):
+        """Cria uma tabela com merges e cabecalho vinho, movendo para antes do sectPr."""
+        if n_rows <= 0 or n_cols <= 0 or not cells:
+            return None
+        # Titulo opcional antes da tabela
+        if titulo:
+            _add_para_before_sectpr(titulo.upper(), font_size=12, bold=True,
+                                    color_hex=VINHO_HEX, alignment=WD_ALIGN_PARAGRAPH.CENTER,
+                                    space_before=8, space_after=4)
+        tbl = doc.add_table(rows=n_rows, cols=n_cols)
+        # Larga 100%
+        try:
+            from docx.shared import Inches as _DocxInches
+            tbl.autofit = False
+            tblPr = tbl._tbl.find(qn('w:tblPr'))
+            if tblPr is None:
+                tblPr = etree.SubElement(tbl._tbl, qn('w:tblPr'))
+                tbl._tbl.insert(0, tblPr)
+            tblW = tblPr.find(qn('w:tblW'))
+            if tblW is None:
+                tblW = etree.SubElement(tblPr, qn('w:tblW'))
+            tblW.set(qn('w:w'), '5000')
+            tblW.set(qn('w:type'), 'pct')
+        except Exception:
+            pass
+        _aplicar_bordas_tabela(tbl)
+        # 1) Aplicar merges primeiro
+        for c in cells:
+            if c.get("rowspan", 1) > 1 or c.get("colspan", 1) > 1:
+                r0, c0 = c["r"], c["c"]
+                r1 = r0 + c["rowspan"] - 1
+                c1 = c0 + c["colspan"] - 1
+                try: tbl.cell(r0, c0).merge(tbl.cell(r1, c1))
+                except Exception: pass
+        # 2) Preencher conteudo
+        for c in cells:
+            r0, c0 = c["r"], c["c"]
+            cell = tbl.cell(r0, c0)
+            is_header = (r0 == 0)
+            if is_header:
+                _sombrear_celula(cell, VINHO_HEX)
+            _estilizar_celula(cell, c.get("text", ""), is_header)
+        # 3) Mover para antes do sectPr
+        body.remove(tbl._element)
+        body.insert(list(body).index(sect_pr), tbl._element)
+        # Espaco depois da tabela
+        _add_para_before_sectpr("", font_size=4, space_after=6)
+        return tbl
+
+    def _add_imagem_docx(img_b64, img_ext="png"):
+        """Insere imagem centralizada, fit-to-area A4 mantendo ratio."""
+        if not img_b64: return None
+        try:
+            img_bytes = base64.b64decode(img_b64)
+        except Exception:
+            return None
+        # Area util A4 retrato com margens padrao: ~16cm x 22cm
+        max_w_cm = 15.5
+        max_h_cm = 20.0
+        w_cm, h_cm = max_w_cm * 0.7, max_h_cm * 0.5  # fallback
+        try:
+            from PIL import Image as PILImage
+            pil = PILImage.open(io.BytesIO(img_bytes))
+            ow, oh = pil.size
+            if ow > 0 and oh > 0:
+                ratio = ow / oh
+                if max_w_cm / max_h_cm >= ratio:
+                    h_cm = max_h_cm
+                    w_cm = max_h_cm * ratio
+                else:
+                    w_cm = max_w_cm
+                    h_cm = max_w_cm / ratio
+        except Exception:
+            pass
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p.add_run()
+        try:
+            run.add_picture(io.BytesIO(img_bytes), width=Cm(w_cm), height=Cm(h_cm))
+        except Exception:
+            return None
+        body.remove(p._element)
+        body.insert(list(body).index(sect_pr), p._element)
+        _add_para_before_sectpr("", font_size=4, space_after=4)
+        return p
+
     # ---- Quebra de pagina apos capa ----
     _add_pagebreak()
 
@@ -731,6 +870,17 @@ def _gerar_docx(payload):
                 _add_para_before_sectpr(texto, font_size=11, color_hex="333333",
                                         space_before=4, space_after=4,
                                         alignment=WD_ALIGN_PARAGRAPH.JUSTIFY)
+
+        elif t == "tabela":
+            _add_tabela_docx(
+                sl.get("n_rows", 0),
+                sl.get("n_cols", 0),
+                sl.get("cells", []),
+                titulo=sl.get("titulo"),
+            )
+
+        elif t == "imagem":
+            _add_imagem_docx(sl.get("img_b64", ""), sl.get("img_ext", "png"))
 
     # ---- Gabarito ----
     if gabarito and gabarito.get("questoes"):
@@ -1120,18 +1270,18 @@ def _reinjetar_imagens_nos_slides(slides, imgs):
     return novos
 
 def _parse_via_claude(texto_bruto, disciplina="", assunto=""):
-    """Usa Claude API para extrair questões de qualquer formato de texto.
+    """Usa Claude API para extrair questões.
 
-    Sem truncamento artificial: o modelo aceita ate ~200k tokens de contexto.
-    Divide em blocos so se o texto for MUITO grande (>150k chars) para evitar
-    limite de saida.
+    Divide em blocos SEMPRE que o texto for consideravelmente grande,
+    para manter cada chamada rapida (< 90s) e nao estourar timeout do
+    servidor em arquivos grandes. Cada chamada tem retry automatico.
     """
-    import json as jsonlib
+    import time
 
     def _montar_prompt(bloco, parte_n=None, total_partes=None):
         sufixo = ""
         if total_partes and total_partes > 1:
-            sufixo = f"\n\n(Este e o bloco {parte_n} de {total_partes}. Extraia apenas as questoes que aparecem neste bloco.)"
+            sufixo = f"\n\n(Este e o bloco {parte_n} de {total_partes}. Extraia apenas as questoes deste bloco.)"
         return f"""Voce e um extrator de questoes de concurso. Analise o texto abaixo e extraia TODAS as questoes.
 
 Retorne APENAS um JSON valido, sem texto antes ou depois, sem marcacoes markdown, com esta estrutura exata:
@@ -1162,12 +1312,28 @@ TEXTO:
 {bloco}
 """
 
-    # Para textos "normais" (ate ~150k chars), uma unica chamada ja resolve.
-    LIMITE_BLOCO = 150000
-    if len(texto_bruto) <= LIMITE_BLOCO:
-        return _chamar_claude_api(_montar_prompt(texto_bruto), max_tokens=16000, timeout=180)
+    def _chamar_com_retry(prompt, max_tokens=8000, timeout=90, tentativas=3):
+        """Chama Claude API com retry exponencial em caso de erro de rede/timeout."""
+        ultimo_erro = None
+        for t in range(tentativas):
+            try:
+                return _chamar_claude_api(prompt, max_tokens=max_tokens, timeout=timeout)
+            except Exception as e:
+                ultimo_erro = e
+                traceback.print_exc()
+                if t < tentativas - 1:
+                    time.sleep(2 ** t)  # 1s, 2s, 4s
+        raise ultimo_erro if ultimo_erro else RuntimeError("Falha ao chamar Claude API")
 
-    # Texto enorme: divide por marcadores de questao para nao cortar no meio.
+    # Divide em blocos de ate 60k chars para manter cada chamada < 90s.
+    # (Antes era 150k e dava timeout em docs grandes.)
+    LIMITE_BLOCO = 60000
+
+    # Texto pequeno: 1 chamada so.
+    if len(texto_bruto) <= LIMITE_BLOCO:
+        return _chamar_com_retry(_montar_prompt(texto_bruto), max_tokens=8000, timeout=90)
+
+    # Texto grande: divide por marcadores de questao para nao cortar no meio.
     RE_Q = re.compile(r'(?=^\d{1,2}\.\s)', re.MULTILINE)
     pedacos = RE_Q.split(texto_bruto)
     blocos, atual = [], ""
@@ -1180,7 +1346,8 @@ TEXTO:
 
     all_q, all_gq, all_gr = [], [], []
     for i, b in enumerate(blocos):
-        r = _chamar_claude_api(_montar_prompt(b, i+1, len(blocos)), max_tokens=16000, timeout=180)
+        r = _chamar_com_retry(_montar_prompt(b, i+1, len(blocos)),
+                              max_tokens=8000, timeout=90)
         all_q.extend(r.get("questoes", []))
         gab = r.get("gabarito", {}) or {}
         all_gq.extend(gab.get("questoes", []))
@@ -1688,8 +1855,12 @@ REGRAS IMPORTANTES:
 """
 
 def _chamar_claude_api(prompt_text, max_tokens=8000, timeout=90):
-    """Chamada genérica à Claude API. Retorna o texto da resposta."""
-    import urllib.request, json as jsonlib
+    """Chamada generica a Claude API. Retorna o JSON da resposta parseado.
+
+    Levanta excecao especifica para erros HTTP (incluindo 429/529) para
+    que o caller possa decidir se tenta novamente.
+    """
+    import urllib.request, urllib.error, json as jsonlib
     payload = jsonlib.dumps({
         "model": "claude-sonnet-4-20250514",
         "max_tokens": max_tokens,
@@ -1705,8 +1876,22 @@ def _chamar_claude_api(prompt_text, max_tokens=8000, timeout=90):
         },
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = jsonlib.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = jsonlib.loads(resp.read())
+    except urllib.error.HTTPError as he:
+        # Repassar erro claro — retry sera feito pelo caller se aplicavel
+        try:
+            body = he.read().decode("utf-8", errors="ignore")
+        except Exception:
+            body = ""
+        raise RuntimeError(f"Claude API HTTP {he.code}: {body[:300]}") from he
+    except urllib.error.URLError as ue:
+        raise RuntimeError(f"Claude API network error: {ue}") from ue
+    except Exception as e:
+        raise RuntimeError(f"Claude API error: {e}") from e
+    if "content" not in data or not data["content"]:
+        raise RuntimeError(f"Claude API resposta inesperada: {str(data)[:300]}")
     txt = data["content"][0]["text"].strip()
     if txt.startswith("```"): txt = "\n".join(txt.split("\n")[1:])
     if txt.endswith("```"): txt = "\n".join(txt.split("\n")[:-1])
@@ -1731,11 +1916,24 @@ def _dividir_texto_em_blocos(texto_estruturado, max_chars=10000):
 def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
     """Usa Claude API para analisar PPTX e estruturar conteúdo inteligentemente."""
     import json as jsonlib
+    import time
 
     texto_estruturado, img_list = _extrair_conteudo_pptx(filepath)
 
-    # Dividir em blocos se necessário
-    blocos = _dividir_texto_em_blocos(texto_estruturado, max_chars=10000)
+    # Blocos menores (8k chars) para cada chamada rodar em <90s
+    blocos = _dividir_texto_em_blocos(texto_estruturado, max_chars=8000)
+
+    def _chamar_com_retry(prompt, tentativas=3):
+        ultimo_erro = None
+        for t in range(tentativas):
+            try:
+                return _chamar_claude_api(prompt, max_tokens=8000, timeout=90)
+            except Exception as e:
+                ultimo_erro = e
+                traceback.print_exc()
+                if t < tentativas - 1:
+                    time.sleep(2 ** t)
+        raise ultimo_erro if ultimo_erro else RuntimeError("Falha Claude API")
 
     all_slides = []
     all_gab_q = []
@@ -1747,7 +1945,7 @@ def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
             sufixo = f"\n\n(Este é o bloco {bi+1} de {len(blocos)}. Processe apenas os slides deste bloco.)"
 
         prompt = _CLAUDE_PROMPT_SLIDES + f"\nCONTEÚDO DA APRESENTAÇÃO:{sufixo}\n{bloco}"
-        resultado = _chamar_claude_api(prompt, max_tokens=8000, timeout=90)
+        resultado = _chamar_com_retry(prompt)
 
         all_slides.extend(resultado.get("slides", []))
         gab = resultado.get("gabarito", {})
@@ -1788,6 +1986,9 @@ def gerar():
             is_pptx = fname.endswith(".pptx")
             is_docx = fname.endswith(".docx")
 
+            # Flag: saida em Word em vez de PowerPoint
+            saida_word = formato in ("slides_to_word", "word_to_word")
+
             # --- SLIDES → WORD ---
             if formato == "slides_to_word":
                 if not is_pptx:
@@ -1807,6 +2008,43 @@ def gerar():
                 fn = "Carranza_" + d + "_" + a + ".docx" if a else "Carranza_" + d + ".docx"
                 return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                  as_attachment=True, download_name=fn)
+
+            # --- WORD → WORD ---
+            # Compartilha TODO o pipeline de extracao do word_to_slides
+            # (parse docx + tabelas + imagens + IA opcional) e no final
+            # gera .docx formatado no lugar de .pptx.
+            elif formato == "word_to_word":
+                if not is_docx:
+                    return jsonify({"erro":"Para o formato Word→Word, envie um arquivo .docx"}), 400
+                with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+                    arq.save(tmp.name); path = tmp.name
+                try:
+                    if usar_ia:
+                        texto_bruto, imgs_docx = _extrair_texto_e_imgs_docx(path)
+                        resultado = _parse_via_claude(texto_bruto, disc, ass)
+                        if "slides" in resultado:
+                            sl = resultado["slides"]
+                        else:
+                            sl = []
+                            for q in resultado.get("questoes", []):
+                                sl.append({
+                                    "tipo": "questao",
+                                    "numero": q.get("numero", 0),
+                                    "enunciado": q.get("enunciado", ""),
+                                    "certo_errado": q.get("certo_errado", False),
+                                    "alternativas": q.get("alternativas", [])
+                                })
+                        gab_raw = resultado.get("gabarito", {})
+                        gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
+                        sl = _reinjetar_imagens_nos_slides(sl, imgs_docx)
+                    else:
+                        sl, gab = _parse_docx(path)
+                    try:
+                        tabelas = _extrair_tabelas_em_ordem(path)
+                        sl = _inserir_slides_tabela(sl, tabelas)
+                    except Exception:
+                        traceback.print_exc()
+                finally: os.unlink(path)
 
             # --- SLIDES → SLIDES ---
             elif formato == "slides_to_slides" or is_pptx:
@@ -1863,11 +2101,17 @@ def gerar():
         else:
             payload = request.get_json(force=True)
             if not payload: return jsonify({"erro":"Payload vazio"}), 400
+            saida_word = False
 
-        # --- Gerar saída (PPTX é o padrão para os demais formatos) ---
-        buf = _build_pptx(payload)
+        # --- Gerar saida: Word (.docx) ou PowerPoint (.pptx) ---
         d = payload.get("disciplina","apresentacao").replace(" ","_")
         a = payload.get("assunto","").replace(" ","_")
+        if saida_word:
+            buf = _gerar_docx(payload)
+            fn = "Carranza_" + d + "_" + a + ".docx" if a else "Carranza_" + d + ".docx"
+            return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                             as_attachment=True, download_name=fn)
+        buf = _build_pptx(payload)
         fn = "Carranza_" + d + "_" + a + ".pptx" if a else "Carranza_" + d + ".pptx"
         return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                          as_attachment=True, download_name=fn)
