@@ -2222,9 +2222,28 @@ CORS(app, origins="*")
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
 
+APP_VERSION = "2026.04.24-async-disk-v2"
+
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "version": APP_VERSION})
+
+@app.route("/versao", methods=["GET"])
+def versao():
+    """Retorna versao + endpoints disponiveis. Usar para debugar deploy."""
+    try:
+        import os as _os
+        jobs_dir_ok = _os.path.isdir(JOBS_DIR)
+        jobs_count = len([f for f in _os.listdir(JOBS_DIR) if f.endswith(".json")]) if jobs_dir_ok else 0
+    except Exception:
+        jobs_dir_ok, jobs_count = False, 0
+    return jsonify({
+        "version": APP_VERSION,
+        "endpoints": ["/", "/versao", "/gerar", "/iniciar", "/status/<id>", "/download/<id>"],
+        "jobs_dir": JOBS_DIR,
+        "jobs_dir_ok": jobs_dir_ok,
+        "jobs_abertos": jobs_count,
+    })
 
 
 def _coletar_params():
@@ -2296,11 +2315,13 @@ def iniciar():
         arq = params["arq"]
         fname = arq.filename or "upload"
         job_id = _uuid.uuid4().hex
-        # Salvar upload em JOBS_DIR/<id>.in (evita depender de /tmp/tmpXXX)
+        print(f"[JOB {job_id}] /iniciar fname={fname!r} formato={params['formato']} usar_ia={params['usar_ia']}", flush=True)
+        # Salvar upload em JOBS_DIR/<id>.in
         in_path = _job_path(job_id, "in")
         arq.save(in_path)
-        # Escrever meta inicial ANTES de dar o return — garante que /status
-        # logo depois sempre encontra o job.
+        in_size = os.path.getsize(in_path) if os.path.exists(in_path) else -1
+        print(f"[JOB {job_id}] input salvo em {in_path} ({in_size} bytes)", flush=True)
+        # Escrever meta inicial ANTES de dar o return
         meta = {
             "status": "processando",
             "started_at": _time.time(),
@@ -2308,6 +2329,8 @@ def iniciar():
             "formato": params["formato"],
         }
         _save_meta(job_id, meta)
+        meta_path = _job_path(job_id, "json")
+        print(f"[JOB {job_id}] meta salva em {meta_path} (existe? {os.path.exists(meta_path)})", flush=True)
         # Disparar processamento em thread
         th = _threading.Thread(
             target=_runner_job,
@@ -2317,6 +2340,7 @@ def iniciar():
             daemon=True,
         )
         th.start()
+        print(f"[JOB {job_id}] thread disparada — retornando job_id", flush=True)
         return jsonify({"job_id": job_id})
     except Exception as e:
         traceback.print_exc()
@@ -2327,6 +2351,14 @@ def iniciar():
 def status_job(job_id):
     meta = _load_meta(job_id)
     if not meta:
+        # Log diagnostico: por que nao achou?
+        path = _job_path(job_id, "json")
+        jobs_listados = []
+        try:
+            jobs_listados = [f for f in os.listdir(JOBS_DIR) if f.endswith(".json")][:5]
+        except Exception as e:
+            jobs_listados = [f"ERR: {e}"]
+        print(f"[JOB {job_id}] /status 404 — meta_path={path} existe={os.path.exists(path) if path else '?'} outros_jobs_dir={jobs_listados}", flush=True)
         return jsonify({"status": "nao_encontrado"}), 404
     resp = {"status": meta.get("status", "processando")}
     started = meta.get("started_at", _time.time())
