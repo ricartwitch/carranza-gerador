@@ -264,14 +264,15 @@ async function esperarJob(jobId) {
   // Polling a cada 2s. Sem limite de tempo no browser — respeitamos o que o
   // servidor decidir (ele vai marcar erro ou done eventualmente).
   let tentativasFalhaRede = 0;
+  let notFoundSeguidos = 0;
   const MAX_FALHAS_REDE = 10;
+  const MAX_NOT_FOUND = 5;  // tolera 5 polls seguidos com 404 (propagacao de disco)
   while (true) {
     await new Promise(r => setTimeout(r, 2000));
     let resp;
     try {
       resp = await fetch(API + '/status/' + jobId);
     } catch(e) {
-      // Falha de rede transitoria — continuar tentando
       tentativasFalhaRede++;
       if (tentativasFalhaRede > MAX_FALHAS_REDE) {
         throw new Error('Perda de conexão com o servidor. Tente recarregar a página e enviar de novo.');
@@ -280,13 +281,21 @@ async function esperarJob(jobId) {
     }
     tentativasFalhaRede = 0;
     if (!resp.ok) {
-      if (resp.status === 404) throw new Error('Job não encontrado no servidor.');
+      if (resp.status === 404) {
+        notFoundSeguidos++;
+        if (notFoundSeguidos >= MAX_NOT_FOUND) {
+          throw new Error('Job não encontrado no servidor. O processo pode ter sido reiniciado. Tente enviar o arquivo novamente.');
+        }
+        // Continua tentando (pode ser propagacao pos-restart)
+        showProgresso(0);
+        continue;
+      }
       throw new Error('Status HTTP ' + resp.status);
     }
+    notFoundSeguidos = 0;
     const s = await resp.json();
     if (s.status === 'done') return s;
     if (s.status === 'erro') throw new Error(s.erro || 'Erro no processamento');
-    // Ainda processando
     showProgresso(s.elapsed_s || 0);
   }
 }
