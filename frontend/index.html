@@ -127,6 +127,7 @@
     <label>De → Para</label>
     <select id="formato" onchange="onFormato()">
       <option value="word_to_slides">Word → Slides Formatados</option>
+      <option value="word_to_word">Word → Word Formatado</option>
       <option value="slides_to_slides">Slides → Slides Formatados</option>
       <option value="slides_to_word">Slides → Word Formatado</option>
     </select>
@@ -196,6 +197,7 @@ let usarIA = false;
 
 const FORMATO_CFG = {
   word_to_slides:  { accept: '.docx,.txt', ext: '.docx ou .txt', desc: 'Envie um .docx ou .txt e receba slides formatados no padrão Carranza.' },
+  word_to_word:    { accept: '.docx', ext: '.docx', desc: 'Envie um .docx e receba um documento Word formatado no padrão Carranza (questões, tabelas e imagens preservadas).', output: '.docx' },
   slides_to_slides: { accept: '.pptx', ext: '.pptx', desc: 'Envie um .pptx não formatado e receba slides reformatados no padrão Carranza.' },
   slides_to_word:  { accept: '.pptx', ext: '.pptx', desc: 'Envie um .pptx e receba um documento Word formatado no padrão Carranza.', output: '.docx' },
 };
@@ -211,7 +213,7 @@ function onFormato() {
   document.getElementById('zone').classList.remove('has-file');
   document.getElementById('zone-txt').textContent = 'Clique ou arraste o arquivo aqui';
   // Atualizar botao e tip conforme formato de saida
-  const isWord = fmt === 'slides_to_word';
+  const isWord = fmt === 'slides_to_word' || fmt === 'word_to_word';
   document.getElementById('btn-label').textContent = isWord ? '⚡ Gerar Documento Word' : '⚡ Gerar Slides';
   document.getElementById('tip-download').textContent = isWord
     ? 'O documento será baixado automaticamente no formato .docx'
@@ -254,6 +256,12 @@ async function gerar() {
   btn.disabled = true; btn.classList.add('loading');
   document.getElementById('msg').style.display = 'none';
 
+  // Aviso para arquivos grandes + modo IA
+  const sizeMB = file.size / (1024*1024);
+  if (usarIA && sizeMB > 0.8) {
+    showMsg('⏳ Arquivo grande com IA: pode levar de 1 a 5 minutos. Não feche a página.', true);
+  }
+
   try {
     const fd = new FormData();
     fd.append('arquivo', file);
@@ -264,23 +272,40 @@ async function gerar() {
     fd.append('formato', formato);
     fd.append('usar_ia', usarIA ? '1' : '0');
 
-    const resp = await fetch(API + '/gerar', { method: 'POST', body: fd });
+    // AbortController para dar feedback claro caso o browser fique muito tempo
+    // aguardando e o usuario queira cancelar. Nao limita timeout — deixa o
+    // servidor controlar via gunicorn.
+    const resp = await fetch(API + '/gerar', {
+      method: 'POST',
+      body: fd,
+      // keepalive nao pode ser usado com body grande; deixamos desligado
+    });
 
     if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.erro || 'Erro ' + resp.status);
+      let errTxt = 'Erro ' + resp.status;
+      try {
+        const err = await resp.json();
+        if (err && err.erro) errTxt = err.erro;
+      } catch(_) {}
+      throw new Error(errTxt);
     }
 
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const disc = document.getElementById('disciplina').value.replace(/ /g,'_') || 'Carranza';
-    const ext = formato === 'slides_to_word' ? '.docx' : '.pptx';
+    const ext = (formato === 'slides_to_word' || formato === 'word_to_word') ? '.docx' : '.pptx';
     a.href = url; a.download = 'Carranza_' + disc + ext; a.click();
     URL.revokeObjectURL(url);
-    showMsg(formato === 'slides_to_word' ? '✅ Documento Word gerado com sucesso!' : '✅ Slides gerados com sucesso!', true);
+    const isWord = formato === 'slides_to_word' || formato === 'word_to_word';
+    showMsg(isWord ? '✅ Documento Word gerado com sucesso!' : '✅ Slides gerados com sucesso!', true);
   } catch(e) {
-    showMsg('❌ Erro: ' + e.message, false);
+    // "Failed to fetch" geralmente = servidor demorou demais e cortou a conexao
+    let msg = e && e.message ? e.message : String(e);
+    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+      msg = 'O servidor demorou demais para responder. Isso costuma acontecer com arquivos grandes usando IA. Tente: (1) desmarcar "Usar IA" e reenviar; (2) dividir o documento em partes menores; ou (3) aguardar 30s e tentar novamente.';
+    }
+    showMsg('❌ ' + msg, false);
   } finally {
     btn.disabled = false; btn.classList.remove('loading');
   }
