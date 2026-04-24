@@ -1961,163 +1961,335 @@ def _parse_pptx_via_claude(filepath, disciplina="", assunto=""):
     return all_slides, gab_final
 
 
+# =========================================================================
+# PIPELINE EXECUTAVEL (compartilhado pelo /gerar sync e pelo /iniciar async)
+# =========================================================================
+
+MIME_PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+def _executar_pipeline(arq_path, fname, disc, ass, prof, tipo, formato, usar_ia,
+                        raw_bytes_if_txt=None):
+    """Executa o pipeline completo e retorna (BytesIO, mime, download_name).
+
+    arq_path: caminho em disco do arquivo (ou None se for .txt em raw_bytes).
+    raw_bytes_if_txt: bytes do arquivo, usado apenas para fluxo .txt.
+    """
+    if not fname:
+        raise ValueError("Nome de arquivo ausente")
+    fname_low = fname.lower()
+    is_pptx = fname_low.endswith(".pptx")
+    is_docx = fname_low.endswith(".docx")
+    saida_word = formato in ("slides_to_word", "word_to_word")
+
+    sl = []
+    gab = None
+
+    # --- SLIDES → WORD ---
+    if formato == "slides_to_word":
+        if not is_pptx:
+            raise ValueError("Para o formato Slides→Word, envie um arquivo .pptx")
+        if usar_ia:
+            sl, gab = _parse_pptx_via_claude(arq_path, disc, ass)
+        else:
+            sl, gab = _parse_pptx(arq_path)
+
+    # --- WORD → WORD ---
+    elif formato == "word_to_word":
+        if not is_docx:
+            raise ValueError("Para o formato Word→Word, envie um arquivo .docx")
+        if usar_ia:
+            texto_bruto, imgs_docx = _extrair_texto_e_imgs_docx(arq_path)
+            resultado = _parse_via_claude(texto_bruto, disc, ass)
+            if "slides" in resultado:
+                sl = resultado["slides"]
+            else:
+                sl = []
+                for q in resultado.get("questoes", []):
+                    sl.append({
+                        "tipo": "questao",
+                        "numero": q.get("numero", 0),
+                        "enunciado": q.get("enunciado", ""),
+                        "certo_errado": q.get("certo_errado", False),
+                        "alternativas": q.get("alternativas", [])
+                    })
+            gab_raw = resultado.get("gabarito", {})
+            gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
+            sl = _reinjetar_imagens_nos_slides(sl, imgs_docx)
+        else:
+            sl, gab = _parse_docx(arq_path)
+        try:
+            tabelas = _extrair_tabelas_em_ordem(arq_path)
+            sl = _inserir_slides_tabela(sl, tabelas)
+        except Exception:
+            traceback.print_exc()
+
+    # --- SLIDES → SLIDES ---
+    elif formato == "slides_to_slides" or is_pptx:
+        if not is_pptx:
+            raise ValueError("Para o formato Slides→Slides, envie um arquivo .pptx")
+        if usar_ia:
+            sl, gab = _parse_pptx_via_claude(arq_path, disc, ass)
+        else:
+            sl, gab = _parse_pptx(arq_path)
+
+    # --- WORD → SLIDES ---
+    elif is_docx:
+        if usar_ia:
+            texto_bruto, imgs_docx = _extrair_texto_e_imgs_docx(arq_path)
+            resultado = _parse_via_claude(texto_bruto, disc, ass)
+            if "slides" in resultado:
+                sl = resultado["slides"]
+            else:
+                sl = []
+                for q in resultado.get("questoes", []):
+                    sl.append({
+                        "tipo": "questao",
+                        "numero": q.get("numero", 0),
+                        "enunciado": q.get("enunciado", ""),
+                        "certo_errado": q.get("certo_errado", False),
+                        "alternativas": q.get("alternativas", [])
+                    })
+            gab_raw = resultado.get("gabarito", {})
+            gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
+            sl = _reinjetar_imagens_nos_slides(sl, imgs_docx)
+        else:
+            sl, gab = _parse_docx(arq_path)
+        try:
+            tabelas = _extrair_tabelas_em_ordem(arq_path)
+            sl = _inserir_slides_tabela(sl, tabelas)
+        except Exception:
+            traceback.print_exc()
+
+    # --- TXT → SLIDES ---
+    else:
+        if raw_bytes_if_txt is None:
+            # Le do disco se necessario
+            with open(arq_path, "rb") as f:
+                raw_bytes_if_txt = f.read()
+        texto = raw_bytes_if_txt.decode("utf-8", errors="ignore")
+        sl, gab = _parse_texto(texto)
+
+    # --- Gerar saida ---
+    payload = {"disciplina": disc, "assunto": ass, "tipo": tipo,
+               "professor": prof, "slides": sl, "gabarito": gab}
+    d = (disc or "apresentacao").replace(" ", "_")
+    a = (ass or "").replace(" ", "_")
+    if saida_word:
+        buf = _gerar_docx(payload)
+        fn = "Carranza_" + d + "_" + a + ".docx" if a else "Carranza_" + d + ".docx"
+        return buf, MIME_DOCX, fn
+    buf = _build_pptx(payload)
+    fn = "Carranza_" + d + "_" + a + ".pptx" if a else "Carranza_" + d + ".pptx"
+    return buf, MIME_PPTX, fn
+
+
+# =========================================================================
+# JOBS ASSINCRONOS (evita "Failed to fetch" em arquivos grandes)
+# =========================================================================
+import threading as _threading
+import uuid as _uuid
+import time as _time
+
+JOBS = {}            # job_id -> dict com status/buf/mime/...
+JOBS_LOCK = _threading.Lock()
+JOB_TTL_DONE = 30 * 60    # remove job concluido apos 30 min sem download
+JOB_TTL_MAX  = 120 * 60   # limite absoluto de 2h em qualquer estado
+
+def _cleanup_jobs_loop():
+    """Thread de limpeza: remove jobs velhos para nao vazar memoria."""
+    while True:
+        try:
+            _time.sleep(60)
+            now = _time.time()
+            with JOBS_LOCK:
+                remove = []
+                for jid, j in JOBS.items():
+                    age = now - j.get("started_at", now)
+                    if j.get("status") == "done":
+                        dsince = now - j.get("done_at", now)
+                        if dsince > JOB_TTL_DONE: remove.append(jid)
+                    if age > JOB_TTL_MAX:
+                        remove.append(jid)
+                for jid in set(remove):
+                    JOBS.pop(jid, None)
+        except Exception:
+            traceback.print_exc()
+
+_threading.Thread(target=_cleanup_jobs_loop, daemon=True).start()
+
+
+def _runner_job(job_id, arq_path, fname, disc, ass, prof, tipo, formato, usar_ia):
+    """Executa o pipeline em thread e atualiza o JOBS dict."""
+    try:
+        buf, mime, filename = _executar_pipeline(
+            arq_path, fname, disc, ass, prof, tipo, formato, usar_ia
+        )
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                JOBS[job_id].update(
+                    status="done",
+                    buf=buf,
+                    mime=mime,
+                    filename=filename,
+                    done_at=_time.time(),
+                )
+    except Exception as e:
+        traceback.print_exc()
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                JOBS[job_id].update(status="erro", erro=str(e),
+                                    done_at=_time.time())
+    finally:
+        # Remover arquivo temporario
+        try:
+            if arq_path and os.path.exists(arq_path):
+                os.unlink(arq_path)
+        except Exception:
+            pass
+
+
+# =========================================================================
+# FLASK APP
+# =========================================================================
 app = Flask(__name__)
 CORS(app, origins="*")
+# Permitir uploads grandes (ate 100MB)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+
 
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
+
+def _coletar_params():
+    """Extrai e valida campos do form. Retorna dict ou (resp, status)."""
+    arq = request.files.get("arquivo")
+    if not arq: return None, ("Arquivo nao enviado", 400)
+    return {
+        "arq": arq,
+        "disc":    request.form.get("disciplina", "DISCIPLINA"),
+        "ass":     request.form.get("assunto", "ASSUNTO"),
+        "prof":    request.form.get("professor", ""),
+        "tipo":    request.form.get("tipo", "QUESTOES"),
+        "formato": request.form.get("formato", "word_to_slides"),
+        "usar_ia": request.form.get("usar_ia", "0") == "1",
+    }, None
+
+
+# ---- Endpoint sincrono (mantido para compat / arquivos pequenos) ----
 @app.route("/gerar", methods=["POST"])
 def gerar():
     try:
         if request.files or request.form:
-            arq = request.files.get("arquivo")
-            disc = request.form.get("disciplina","DISCIPLINA")
-            ass  = request.form.get("assunto","ASSUNTO")
-            prof = request.form.get("professor","")
-            tipo = request.form.get("tipo","QUESTOES")
-            formato = request.form.get("formato","word_to_slides")
-            usar_ia = request.form.get("usar_ia","0") == "1"
-            if not arq: return jsonify({"erro":"Arquivo nao enviado"}), 400
-            fname = arq.filename.lower()
-
-            # Auto-detectar formato pela extensão se necessário
-            is_pptx = fname.endswith(".pptx")
-            is_docx = fname.endswith(".docx")
-
-            # Flag: saida em Word em vez de PowerPoint
-            saida_word = formato in ("slides_to_word", "word_to_word")
-
-            # --- SLIDES → WORD ---
-            if formato == "slides_to_word":
-                if not is_pptx:
-                    return jsonify({"erro":"Para o formato Slides→Word, envie um arquivo .pptx"}), 400
-                with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
-                    arq.save(tmp.name); path = tmp.name
-                try:
-                    if usar_ia:
-                        sl, gab = _parse_pptx_via_claude(path, disc, ass)
-                    else:
-                        sl, gab = _parse_pptx(path)
-                finally: os.unlink(path)
-                payload = {"disciplina":disc,"assunto":ass,"tipo":tipo,"professor":prof,"slides":sl,"gabarito":gab}
-                buf = _gerar_docx(payload)
-                d = disc.replace(" ","_") or "apresentacao"
-                a = ass.replace(" ","_")
-                fn = "Carranza_" + d + "_" + a + ".docx" if a else "Carranza_" + d + ".docx"
-                return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                 as_attachment=True, download_name=fn)
-
-            # --- WORD → WORD ---
-            # Compartilha TODO o pipeline de extracao do word_to_slides
-            # (parse docx + tabelas + imagens + IA opcional) e no final
-            # gera .docx formatado no lugar de .pptx.
-            elif formato == "word_to_word":
-                if not is_docx:
-                    return jsonify({"erro":"Para o formato Word→Word, envie um arquivo .docx"}), 400
-                with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
-                    arq.save(tmp.name); path = tmp.name
-                try:
-                    if usar_ia:
-                        texto_bruto, imgs_docx = _extrair_texto_e_imgs_docx(path)
-                        resultado = _parse_via_claude(texto_bruto, disc, ass)
-                        if "slides" in resultado:
-                            sl = resultado["slides"]
-                        else:
-                            sl = []
-                            for q in resultado.get("questoes", []):
-                                sl.append({
-                                    "tipo": "questao",
-                                    "numero": q.get("numero", 0),
-                                    "enunciado": q.get("enunciado", ""),
-                                    "certo_errado": q.get("certo_errado", False),
-                                    "alternativas": q.get("alternativas", [])
-                                })
-                        gab_raw = resultado.get("gabarito", {})
-                        gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
-                        sl = _reinjetar_imagens_nos_slides(sl, imgs_docx)
-                    else:
-                        sl, gab = _parse_docx(path)
-                    try:
-                        tabelas = _extrair_tabelas_em_ordem(path)
-                        sl = _inserir_slides_tabela(sl, tabelas)
-                    except Exception:
-                        traceback.print_exc()
-                finally: os.unlink(path)
-
-            # --- SLIDES → SLIDES ---
-            elif formato == "slides_to_slides" or is_pptx:
-                if not is_pptx:
-                    return jsonify({"erro":"Para o formato Slides→Slides, envie um arquivo .pptx"}), 400
-                with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
-                    arq.save(tmp.name); path = tmp.name
-                try:
-                    if usar_ia:
-                        sl, gab = _parse_pptx_via_claude(path, disc, ass)
-                    else:
-                        sl, gab = _parse_pptx(path)
-                finally: os.unlink(path)
-
-            elif is_docx:
-                # --- WORD → SLIDES (fluxo original) ---
-                with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
-                    arq.save(tmp.name); path = tmp.name
-                try:
-                    if usar_ia:
-                        texto_bruto, imgs_docx = _extrair_texto_e_imgs_docx(path)
-                        resultado = _parse_via_claude(texto_bruto, disc, ass)
-                        if "slides" in resultado:
-                            sl = resultado["slides"]
-                        else:
-                            sl = []
-                            for q in resultado.get("questoes", []):
-                                sl.append({
-                                    "tipo": "questao",
-                                    "numero": q.get("numero", 0),
-                                    "enunciado": q.get("enunciado", ""),
-                                    "certo_errado": q.get("certo_errado", False),
-                                    "alternativas": q.get("alternativas", [])
-                                })
-                        gab_raw = resultado.get("gabarito", {})
-                        gab = gab_raw if gab_raw and gab_raw.get("questoes") else None
-                        # Re-injetar imagens que o Claude nao viu (ele so recebeu texto)
-                        sl = _reinjetar_imagens_nos_slides(sl, imgs_docx)
-                    else:
-                        sl, gab = _parse_docx(path)
-                    # Extrair tabelas de conteudo (nao-gabarito) e posicionar no fluxo
-                    try:
-                        tabelas = _extrair_tabelas_em_ordem(path)
-                        sl = _inserir_slides_tabela(sl, tabelas)
-                    except Exception:
-                        traceback.print_exc()
-                finally: os.unlink(path)
-            else:
-                # --- TXT → SLIDES (fluxo original) ---
-                texto = arq.read().decode("utf-8", errors="ignore")
-                sl, gab = _parse_texto(texto)
-
-            payload = {"disciplina":disc,"assunto":ass,"tipo":tipo,"professor":prof,"slides":sl,"gabarito":gab}
+            params, err = _coletar_params()
+            if err: return jsonify({"erro": err[0]}), err[1]
+            arq = params["arq"]
+            fname = arq.filename or "upload"
+            # Salvar em tmp
+            suffix = "." + (fname.rsplit(".", 1)[-1] if "." in fname else "bin")
+            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+            arq.save(tmp.name); tmp.close()
+            try:
+                buf, mime, filename = _executar_pipeline(
+                    tmp.name, fname,
+                    params["disc"], params["ass"], params["prof"],
+                    params["tipo"], params["formato"], params["usar_ia"]
+                )
+            finally:
+                try: os.unlink(tmp.name)
+                except Exception: pass
+            return send_file(buf, mimetype=mime,
+                             as_attachment=True, download_name=filename)
         else:
             payload = request.get_json(force=True)
-            if not payload: return jsonify({"erro":"Payload vazio"}), 400
-            saida_word = False
-
-        # --- Gerar saida: Word (.docx) ou PowerPoint (.pptx) ---
-        d = payload.get("disciplina","apresentacao").replace(" ","_")
-        a = payload.get("assunto","").replace(" ","_")
-        if saida_word:
-            buf = _gerar_docx(payload)
-            fn = "Carranza_" + d + "_" + a + ".docx" if a else "Carranza_" + d + ".docx"
-            return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            if not payload: return jsonify({"erro": "Payload vazio"}), 400
+            saida_word = payload.get("saida_word", False)
+            d = (payload.get("disciplina") or "apresentacao").replace(" ", "_")
+            a = (payload.get("assunto") or "").replace(" ", "_")
+            if saida_word:
+                buf = _gerar_docx(payload)
+                fn = "Carranza_" + d + "_" + a + ".docx" if a else "Carranza_" + d + ".docx"
+                return send_file(buf, mimetype=MIME_DOCX,
+                                 as_attachment=True, download_name=fn)
+            buf = _build_pptx(payload)
+            fn = "Carranza_" + d + "_" + a + ".pptx" if a else "Carranza_" + d + ".pptx"
+            return send_file(buf, mimetype=MIME_PPTX,
                              as_attachment=True, download_name=fn)
-        buf = _build_pptx(payload)
-        fn = "Carranza_" + d + "_" + a + ".pptx" if a else "Carranza_" + d + ".pptx"
-        return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                         as_attachment=True, download_name=fn)
     except Exception as e:
         traceback.print_exc()
         return jsonify({"erro": str(e)}), 500
 
+
+# ---- Endpoints assincronos (evita timeout em arquivos grandes) ----
+@app.route("/iniciar", methods=["POST"])
+def iniciar():
+    """Aceita upload, dispara processamento em thread, retorna job_id."""
+    try:
+        params, err = _coletar_params()
+        if err: return jsonify({"erro": err[0]}), err[1]
+        arq = params["arq"]
+        fname = arq.filename or "upload"
+        suffix = "." + (fname.rsplit(".", 1)[-1] if "." in fname else "bin")
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        arq.save(tmp.name); tmp.close()
+        job_id = _uuid.uuid4().hex
+        with JOBS_LOCK:
+            JOBS[job_id] = {
+                "status": "processando",
+                "started_at": _time.time(),
+            }
+        th = _threading.Thread(
+            target=_runner_job,
+            args=(job_id, tmp.name, fname,
+                  params["disc"], params["ass"], params["prof"],
+                  params["tipo"], params["formato"], params["usar_ia"]),
+            daemon=True,
+        )
+        th.start()
+        return jsonify({"job_id": job_id})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"erro": str(e)}), 500
+
+
+@app.route("/status/<job_id>", methods=["GET"])
+def status_job(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"status": "nao_encontrado"}), 404
+        resp = {"status": job.get("status", "processando")}
+        started = job.get("started_at", _time.time())
+        resp["elapsed_s"] = int(_time.time() - started)
+        if job.get("status") == "erro":
+            resp["erro"] = job.get("erro", "")
+        if job.get("status") == "done":
+            resp["filename"] = job.get("filename")
+    return jsonify(resp)
+
+
+@app.route("/download/<job_id>", methods=["GET"])
+def download_job(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"erro": "Job nao encontrado"}), 404
+        if job.get("status") != "done":
+            return jsonify({"erro": "Job ainda nao finalizado",
+                            "status": job.get("status")}), 400
+        buf = job.get("buf")
+        mime = job.get("mime")
+        filename = job.get("filename")
+        # Remover job apos entrega para liberar memoria
+        JOBS.pop(job_id, None)
+    try:
+        buf.seek(0)
+    except Exception:
+        pass
+    return send_file(buf, mimetype=mime, as_attachment=True, download_name=filename)
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
