@@ -261,12 +261,11 @@ function showProgresso(segundos) {
 }
 
 async function esperarJob(jobId) {
-  // Polling a cada 2s. Sem limite de tempo no browser — respeitamos o que o
-  // servidor decidir (ele vai marcar erro ou done eventualmente).
+  // Polling a cada 2s. Sem limite de tempo no browser.
   let tentativasFalhaRede = 0;
   let notFoundSeguidos = 0;
   const MAX_FALHAS_REDE = 10;
-  const MAX_NOT_FOUND = 5;  // tolera 5 polls seguidos com 404 (propagacao de disco)
+  const MAX_NOT_FOUND = 5;
   while (true) {
     await new Promise(r => setTimeout(r, 2000));
     let resp;
@@ -283,10 +282,14 @@ async function esperarJob(jobId) {
     if (!resp.ok) {
       if (resp.status === 404) {
         notFoundSeguidos++;
+        // Tenta detectar: endpoint nao existe (deploy desatualizado) vs job expirado
+        const contentType = resp.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          throw new Error('O endpoint /status não existe no servidor. Provável: o deploy novo ainda não subiu. Abra ' + API + '/versao no navegador para checar.');
+        }
         if (notFoundSeguidos >= MAX_NOT_FOUND) {
           throw new Error('Job não encontrado no servidor. O processo pode ter sido reiniciado. Tente enviar o arquivo novamente.');
         }
-        // Continua tentando (pode ser propagacao pos-restart)
         showProgresso(0);
         continue;
       }
