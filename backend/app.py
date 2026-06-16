@@ -1862,7 +1862,7 @@ def _chamar_claude_api(prompt_text, max_tokens=8000, timeout=90):
     """
     import urllib.request, urllib.error, json as jsonlib
     payload = jsonlib.dumps({
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-6",
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt_text}]
     }).encode()
